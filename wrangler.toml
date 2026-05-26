@@ -1,0 +1,48 @@
+name = "points-trading-system"
+main = "src/index.ts"
+compatibility_date = "2024-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ========== Smart Placement ==========
+[placement]
+mode = "smart"
+region = "aws:ap-southeast-1"
+
+# ========== R2 存储桶绑定 ==========
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "points-images"
+
+# ========== KV 缓存 ==========
+[[kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# ========== 定时任务 (每分钟轮询，根据配置决定是否执行) ==========
+[triggers]
+crons = ["* * * * *"]
+
+# ========== 环境变量 ==========
+[vars]
+SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
+SUPABASE_KEY = "YOUR_SUPABASE_SERVICE_ROLE_KEY"
+JWT_SECRET = "YOUR_JWT_SECRET_RANDOM_STRING"
+ADMIN_DEFAULT_USERNAME = "admin"
+ADMIN_DEFAULT_PASSWORD = "CHANGE_ME"
+TURNSTILE_SITE_KEY = "YOUR_TURNSTILE_SITE_KEY"
+TURNSTILE_SECRET_KEY = "YOUR_TURNSTILE_SECRET_KEY"
+SERVERCHAN_SENDKEY = "YOUR_SERVERCHAN_SENDKEY"
+
+# ========== Worker Assets (静态资源) ==========
+[assets]
+directory = "./frontend"
+binding = "ASSETS"
+
+# ========== 本地开发 ==========
+[dev]
+port = 8787
+
+# ========== Workers 日志 ==========
+[observability]
+enabled = true
+head_sampling_rate = 1

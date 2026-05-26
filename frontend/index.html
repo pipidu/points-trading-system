@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>System</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: #f5f5f5; color: #1a1a1a; min-height: 100vh; line-height: 1.5;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .login-card {
+    width: 400px; max-width: 92vw; background: #fff;
+    border: 1px solid #ccc; padding: 32px 28px;
+  }
+  .login-card h1 {
+    text-align: center; font-size: 1.1rem; font-weight: 400; letter-spacing: 2px;
+    color: #1a1a1a; margin-bottom: 28px; text-transform: uppercase;
+  }
+  .login-switch {
+    display: flex; margin-bottom: 22px; border: 1px solid #1a1a1a;
+  }
+  .switch-btn {
+    flex: 1; border: none; padding: 8px 0; cursor: pointer; font-size: 0.85rem;
+    background: #fff; color: #1a1a1a; font-weight: 400;
+  }
+  .switch-btn.active { background: #1a1a1a; color: #fff; }
+  .login-panel { display: none; }
+  .login-panel.active { display: block; }
+  .form-group { margin-bottom: 16px; }
+  .form-group label {
+    display: block; font-size: 0.8rem; font-weight: 400; color: #666; margin-bottom: 4px;
+  }
+  .form-group input {
+    width: 100%; padding: 10px 8px; border: 1px solid #ccc; font-size: 0.9rem;
+    outline: none; background: #fff; color: #1a1a1a; border-radius: 0;
+  }
+  .form-group input:focus { border-color: #1a1a1a; }
+  .cf-turnstile-wrap { display: flex; justify-content: center; margin: 10px 0 16px; }
+  .captcha-wrap { display: flex; gap: 10px; align-items: flex-end; margin: 10px 0 16px; }
+  .captcha-svg { border: 1px solid #ccc; cursor: pointer; height: 54px; width: 160px; flex-shrink: 0; }
+  .captcha-input { flex: 1; }
+  .captcha-input input { width: 100%; padding: 10px 8px; border: 1px solid #ccc; font-size: 0.9rem; outline: none; border-radius: 0; }
+  .captcha-input input:focus { border-color: #1a1a1a; }
+  .btn-login {
+    width: 100%; padding: 10px 0; border: none; cursor: pointer;
+    font-size: 0.9rem; background: #1a1a1a; color: #fff; border-radius: 0;
+  }
+  .btn-login:hover { background: #333; }
+  .login-error { color: #d00; font-size: 0.8rem; margin-top: 10px; text-align: center; }
+  @media (max-width: 768px) {
+    .login-card { width: 94vw; padding: 24px 20px; }
+  }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <h1>System</h1>
+
+  <div class="login-switch">
+    <button class="switch-btn active" data-role="user">用户登录</button>
+    <button class="switch-btn" data-role="admin">管理员登录</button>
+  </div>
+
+  <div class="login-panel active" id="panel-user">
+    <form id="login-form-user">
+      <div class="form-group"><label>用户名</label><input type="text" id="login-username-user" required autocomplete="username"></div>
+      <div class="form-group"><label>密码</label><input type="password" id="login-password-user" required autocomplete="current-password"></div>
+      <div id="captcha-zone-user"></div>
+      <button type="submit" class="btn-login">登录</button>
+    </form>
+    <p class="login-error" id="login-error-user"></p>
+  </div>
+
+  <div class="login-panel" id="panel-admin">
+    <form id="login-form-admin">
+      <div class="form-group"><label>用户名</label><input type="text" id="login-username-admin" required autocomplete="username"></div>
+      <div class="form-group"><label>密码</label><input type="password" id="login-password-admin" required autocomplete="current-password"></div>
+      <div id="captcha-zone-admin"></div>
+      <button type="submit" class="btn-login">登录</button>
+    </form>
+    <p class="login-error" id="login-error-admin"></p>
+  </div>
+</div>
+
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<script src="/shared/api.js"></script>
+<script>
+const switchBtns = document.querySelectorAll('.switch-btn');
+const panelUser = document.getElementById('panel-user');
+const panelAdmin = document.getElementById('panel-admin');
+let captchaMode = 'none';
+let turnstileSiteKey = '';
+let captchaIdUser = '', captchaIdAdmin = '';
+
+async function loadCaptchaConfig() {
+  try {
+    const cfg = await API.get('/auth/captcha-mode');
+    captchaMode = cfg.mode || 'none';
+    turnstileSiteKey = cfg.sitekey || '';
+  } catch { captchaMode = 'none'; }
+  buildCaptchaUI('user');
+  buildCaptchaUI('admin');
+  if (captchaMode === 'turnstile') loadTurnstileScript();
+}
+
+function buildCaptchaUI(role) {
+  const zone = document.getElementById(`captcha-zone-${role}`);
+  if (!zone) return;
+  if (captchaMode === 'turnstile') {
+    zone.innerHTML = `<div class="cf-turnstile-wrap"><div class="cf-turnstile" data-sitekey="${turnstileSiteKey}" data-theme="light"></div></div>`;
+  } else if (captchaMode === 'captcha') {
+    zone.innerHTML = `<div class="captcha-wrap">
+      <div class="captcha-svg" id="captcha-img-${role}" onclick="refreshCaptcha('${role}')"></div>
+      <div class="captcha-input"><input type="text" id="captcha-answer-${role}" placeholder="验证码" autocomplete="off"></div>
+    </div>`;
+    refreshCaptcha(role);
+  } else {
+    zone.innerHTML = '';
+  }
+}
+
+function loadTurnstileScript() {
+  if (document.querySelector('script[src*="turnstile"]')) return;
+  const s = document.createElement('script');
+  s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+  s.async = true;
+  s.defer = true;
+  document.head.appendChild(s);
+}
+
+async function refreshCaptcha(role) {
+  try {
+    const data = await API.get('/auth/captcha');
+    if (role === 'user') captchaIdUser = data.id;
+    else captchaIdAdmin = data.id;
+    const img = document.getElementById(`captcha-img-${role}`);
+    if (img) img.innerHTML = data.svg;
+    const inp = document.getElementById(`captcha-answer-${role}`);
+    if (inp) inp.value = '';
+  } catch {}
+}
+
+function switchRole(role) {
+  switchBtns.forEach(b => b.classList.toggle('active', b.dataset.role === role));
+  panelUser.classList.toggle('active', role === 'user');
+  panelAdmin.classList.toggle('active', role === 'admin');
+}
+
+switchBtns.forEach(btn => btn.addEventListener('click', () => switchRole(btn.dataset.role)));
+
+async function doLogin(role, username, password, errorId) {
+  const err = document.getElementById(errorId);
+  err.textContent = '';
+  const body = { username, password };
+  if (captchaMode === 'turnstile') {
+    const widget = document.querySelector(`#captcha-zone-${role} .cf-turnstile`);
+    body.turnstile_token = (widget && typeof turnstile !== 'undefined') ? turnstile.getResponse(widget) : '';
+    if (!body.turnstile_token) { err.textContent = '请完成人机验证'; return; }
+  } else if (captchaMode === 'captcha') {
+    body.captcha_id = role === 'user' ? captchaIdUser : captchaIdAdmin;
+    body.captcha_answer = document.getElementById(`captcha-answer-${role}`)?.value || '';
+    if (!body.captcha_answer) { err.textContent = '请输入验证码'; return; }
+  }
+  const data = await API.post('/auth/login', body);
+  if (role === 'admin' && data.user.role !== 'admin') throw new Error('非管理员账号');
+  if (role === 'user' && data.user.role !== 'user' && data.user.role !== 'admin') throw new Error('非用户账号');
+  API.setToken(data.token); API.user = data.user;
+  localStorage.setItem('login_mode', role);
+  window.location.href = role === 'admin' ? '/admin/' : '/user/';
+}
+
+document.getElementById('login-form-user').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await doLogin('user',
+      document.getElementById('login-username-user').value,
+      document.getElementById('login-password-user').value,
+      'login-error-user'
+    );
+  } catch (err) {
+    document.getElementById('login-error-user').textContent = err.message;
+    if (captchaMode === 'captcha') refreshCaptcha('user');
+    else if (captchaMode === 'turnstile' && typeof turnstile !== 'undefined') {
+      const w = document.querySelector('#captcha-zone-user .cf-turnstile');
+      if (w) turnstile.reset(w);
+    }
+  }
+});
+
+document.getElementById('login-form-admin').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await doLogin('admin',
+      document.getElementById('login-username-admin').value,
+      document.getElementById('login-password-admin').value,
+      'login-error-admin'
+    );
+  } catch (err) {
+    document.getElementById('login-error-admin').textContent = err.message;
+    if (captchaMode === 'captcha') refreshCaptcha('admin');
+    else if (captchaMode === 'turnstile' && typeof turnstile !== 'undefined') {
+      const w = document.querySelector('#captcha-zone-admin .cf-turnstile');
+      if (w) turnstile.reset(w);
+    }
+  }
+});
+
+async function autoRedirect() {
+  if (!API.isLoggedIn) return;
+  try {
+    const me = await API.get('/auth/me');
+    API.user = { id: me.id, username: me.username, role: me.role, display_name: me.display_name };
+    const mode = localStorage.getItem('login_mode') || '';
+    if (me.role === 'admin' && mode === 'user') {
+      window.location.href = '/user/';
+      return;
+    }
+    window.location.href = me.role === 'admin' ? '/admin/' : '/user/';
+  } catch {
+    API.setToken('');
+  }
+}
+
+autoRedirect();
+loadCaptchaConfig();
+</script>
+</body>
+</html>

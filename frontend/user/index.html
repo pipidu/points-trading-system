@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>点数交易系统 - 用户中心</title>
+<link rel="stylesheet" href="/shared/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 登录 -->
+  <div id="login-page" class="login-page">
+    <div class="login-card">
+      <h2>🎯 用户登录</h2>
+      <form id="login-form">
+        <div class="form-group"><label>用户名</label><input type="text" id="login-username" required autocomplete="username"></div>
+        <div class="form-group"><label>密码</label><input type="password" id="login-password" required autocomplete="current-password"></div>
+        <button type="submit" class="btn btn-primary w-full">登录</button>
+      </form>
+      <p id="login-error" class="text-sm" style="color:var(--danger);margin-top:12px;"></p>
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="main-page" class="hidden">
+    <header class="header">
+      <div class="app-container header-inner">
+        <h1>🎯 点数中心</h1>
+        <div class="user-info">
+          <span id="user-name"></span>
+          <span id="user-balance" class="balance">0 点</span>
+          <span id="expiry-warning" class="text-sm hidden" style="color:var(--warn);font-weight:600;background:var(--warn-bg);padding:2px 8px;border-radius:12px;"></span>
+          <button class="btn btn-outline btn-sm" onclick="location.reload()">🔄 刷新</button>
+          <button class="btn btn-outline btn-sm" onclick="logout()">退出</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-container" style="padding-top:20px;">
+      <!-- 快速操作 -->
+      <div class="stats-grid" style="margin-bottom:16px;">
+        <div class="stat-card" id="stat-balance"><div class="num">--</div><div class="label">可用点数</div></div>
+        <div class="stat-card" id="stat-loans"><div class="num">--</div><div class="label">待还贷款</div></div>
+        <div class="stat-card" id="stat-backpack"><div class="num">--</div><div class="label">背包物品</div></div>
+      </div>
+      <div id="next-dist" class="card hidden" style="text-align:center;background:var(--primary-light);border-color:var(--primary);padding:10px;margin-bottom:16px;">
+        <span class="text-sm text-muted">🕐 下次基础点数发放: </span><strong id="next-dist-time" style="color:var(--primary);">--</strong>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="tasks">📋 做任务赚点数</button>
+        <button class="tab-btn" data-tab="surprise">🎲 惊喜任务</button>
+        <button class="tab-btn" data-tab="lottery">🎰 抽奖中心</button>
+        <button class="tab-btn" data-tab="shop">🛒 兑换中心</button>
+        <button class="tab-btn" data-tab="history">📜 我的记录</button>
+        <button class="tab-btn" data-tab="loans">💰 贷款中心</button>
+      </div>
+
+      <div id="tab-content"></div>
+    </div>
+  </div>
+
+  <div id="modal-container"></div>
+  <div id="draw-overlay" class="draw-overlay hidden">
+    <div class="draw-overlay-card">
+      <div class="draw-spinner"></div>
+      <div class="draw-overlay-text">抽卡中...</div>
+      <div class="draw-overlay-sub">请稍候，不要重复点击</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/shared/api.js"></script>
+<script>
+let currentTab = 'tasks';
+let drawBusy = false;
+let pityCache = null;
+
+function toast(m, t = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${t}`; el.textContent = m;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+function setDrawBusy(busy, message = '抽卡中...') {
+  drawBusy = busy;
+  const overlay = document.getElementById('draw-overlay');
+  if (overlay) {
+    const text = overlay.querySelector('.draw-overlay-text');
+    if (text) text.textContent = message;
+    overlay.classList.toggle('hidden', !busy);
+  }
+  document.querySelectorAll('.lottery-draw-btn').forEach(btn => {
+    if (busy) {
+      btn.dataset.prevDisabled = btn.disabled ? '1' : '0';
+      btn.disabled = true;
+      btn.classList.add('is-loading');
+    } else {
+      btn.disabled = btn.dataset.prevDisabled === '1';
+      btn.classList.remove('is-loading');
+      delete btn.dataset.prevDisabled;
+    }
+  });
+}
+
+function applyPityUI(pity) {
+  if (!pity) return;
+  const progressEl = document.getElementById('pity-progress');
+  const barEl = document.getElementById('pity-bar');
+  const targetWrap = document.getElementById('pity-target');
+  const targetName = document.getElementById('pity-target-name');
+
+  if (progressEl) progressEl.textContent = `${pity.current}/${pity.max}`;
+  if (barEl) {
+    const pct = pity.max > 0 ? Math.min(100, (pity.current / pity.max) * 100) : 0;
+    barEl.style.width = `${pct}%`;
+  }
+  if (targetWrap && targetName) {
+    if (pity.targetItemName) {
+      targetName.textContent = pity.targetItemName;
+      targetWrap.classList.remove('hidden');
+    } else {
+      targetWrap.classList.add('hidden');
+    }
+  }
+}
+
+async function refreshPity(poolCost) {
+  try {
+    const p = await API.get('/lottery/pity');
+    pityCache = { ...p, cost: p.cost ?? poolCost };
+    applyPityUI(pityCache);
+  } catch {}
+}
+
+async function loadLotteryHistory() {
+  const host = document.getElementById('lottery-history');
+  if (!host) return;
+  try {
+    const h = await API.get('/lottery/history');
+    if (h.draws?.length) {
+      let html = '<div class="card"><h3>📜 抽卡记录</h3><div class="table-wrap"><table><thead><tr><th>物品</th><th>稀有度</th><th>保底</th><th>时间</th></tr></thead><tbody>';
+      for (const d of h.draws.slice(0, 10)) {
+        html += `<tr><td>${d.item_icon||''} ${esc(d.item_name)}</td>
+          <td><span class="tag tag-${d.rarity==='legendary'?'gold':d.rarity==='epic'?'approved':'info'}">${d.rarity}</span></td>
+          <td>${d.is_pity?'<span class="tag tag-gold">保底</span>':'第'+d.draw_index+'抽'}</td>
+          <td>${fmtDate(d.created_at)}</td></tr>`;
+      }
+      html += '</tbody></table></div></div>';
+      host.innerHTML = html;
+    } else {
+      host.innerHTML = '';
+    }
+  } catch { host.innerHTML = ''; }
+}
+
+// ========== 登录 ==========
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const data = await API.post('/auth/login', {
+      username: document.getElementById('login-username').value,
+      password: document.getElementById('login-password').value,
+    });
+    API.setToken(data.token); API.user = data.user;
+    localStorage.setItem('login_mode', 'user');
+    document.getElementById('login-page').classList.add('hidden');
+    document.getElementById('main-page').classList.remove('hidden');
+    document.getElementById('user-name').textContent = data.user.display_name || data.user.username;
+    initUser();
+  } catch (err) { document.getElementById('login-error').textContent = err.message; }
+});
+
+function logout() { API.setToken(''); API.user = null; localStorage.removeItem('login_mode'); sessionStorage.removeItem('user_me'); location.href = '/'; }
+
+async function initUser(me) {
+  if (!API.isLoggedIn) return;
+  window._me = me || await API.get('/auth/me').catch(() => null);
+  if (!window._me) return;
+  const bal = window._me.realtime_balance;
+  document.getElementById('user-balance').textContent = `${bal} 点`;
+  document.getElementById('user-balance').className = `balance${bal < 0 ? ' negative' : ''}`;
+  document.getElementById('stat-balance').querySelector('.num').textContent = bal;
+  document.getElementById('user-name').textContent = window._me.display_name || window._me.username;
+
+  const hashTab = location.hash.replace('#', '');
+  const validTabs = ['tasks','surprise','lottery','shop','history','loans'];
+  switchTab(validTabs.includes(hashTab) ? hashTab : 'tasks');
+
+  // 异步补全统计数据
+  refreshStatsBg();
+}
+
+async function bootstrapAuth() {
+  if (!API.isLoggedIn) return;
+  // 快速缓存恢复
+  const cached = sessionStorage.getItem('user_me');
+  if (cached) {
+    try {
+      const me = JSON.parse(cached);
+      const now = Date.now();
+      if (now - (me._ts || 0) < 30000) {
+        API.user = { id: me.id, username: me.username, role: me.role, display_name: me.display_name };
+        document.getElementById('login-page').classList.add('hidden');
+        document.getElementById('main-page').classList.remove('hidden');
+        initUser(me);
+        return;
+      }
+    } catch {}
+  }
+  try {
+    const me = await API.get('/auth/me');
+    const mode = localStorage.getItem('login_mode') || '';
+    if (me.role === 'admin' && mode !== 'user') { location.href = '/admin/'; return; }
+    me._ts = Date.now();
+    sessionStorage.setItem('user_me', JSON.stringify(me));
+    API.user = { id: me.id, username: me.username, role: me.role, display_name: me.display_name };
+    document.getElementById('login-page').classList.add('hidden');
+    document.getElementById('main-page').classList.remove('hidden');
+    initUser(me);
+  } catch {
+    API.setToken('');
+  }
+}
+
+bootstrapAuth();
+
+// 后台补全统计 (不阻塞 UI)
+async function refreshStatsBg() {
+  try {
+    const [tasks, items, loans, bp] = await Promise.all([
+      API.get('/tasks'), API.get('/shop/items'), API.get('/loans/my'),
+      API.get('/lottery/backpack').catch(() => ({ backpack: [] })),
+    ]);
+    const me = window._me;
+    if (!me) return;
+
+    // 点数过期警告
+    const expWarn = document.getElementById('expiry-warning');
+    if (me.expiring_points > 0) {
+      expWarn.textContent = `⚠️ ${me.expiring_points} 点将在7天内过期`;
+      expWarn.classList.remove('hidden');
+    }
+
+    const activeLoans = loans.loans.filter(l => l.status === 'active');
+    const loanTotal = activeLoans.reduce((s, l) => s + l.remaining, 0);
+    document.getElementById('stat-loans').querySelector('.num').textContent = loanTotal || '0';
+    const bpCount = (bp.backpack||[]).filter(i => !i.is_redeemed).reduce((s, i) => s + (i.quantity||0), 0);
+    document.getElementById('stat-backpack').querySelector('.num').textContent = bpCount;
+
+    if (me.next_base_distribution) {
+      const nextDate = new Date(me.next_base_distribution);
+      document.getElementById('next-dist-time').textContent = nextDate.toLocaleString('zh-CN');
+      document.getElementById('next-dist').classList.remove('hidden');
+    }
+
+    window._loans = loans.loans; window._backpack = bp.backpack || [];
+  } catch(e) { /* ignore */ }
+}
+
+async function refreshStats() {
+  if (!API.isLoggedIn) return;
+  const me = await API.get('/auth/me');
+  me._ts = Date.now();
+  sessionStorage.setItem('user_me', JSON.stringify(me));
+  window._me = me;
+  const bal = me.realtime_balance;
+  const balEl = document.getElementById('user-balance');
+  balEl.textContent = `${bal} 点`;
+  balEl.className = `balance${bal < 0 ? ' negative' : ''}`;
+  document.getElementById('stat-balance').querySelector('.num').textContent = bal;
+  refreshStatsBg();
+}
+
+// Tabs
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+function switchTab(tab) {
+  currentTab = tab;
+  location.hash = '#' + tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  const activeBtn = document.querySelector(`[data-tab="${tab}"]`);
+  if (activeBtn) activeBtn.classList.add('active');
+  const loaders = { tasks: loadTasks, surprise: loadSurprise, lottery: loadLottery, shop: loadShop, history: loadHistory, loans: loadLoans };
+  if (loaders[tab]) loaders[tab]();
+}
+
+// ========== 任务 ==========
+async function loadTasks() {
+  try {
+    const d = await API.get('/tasks');
+    let html = '';
+    for (const t of d.tasks) {
+      html += `<div class="card">
+        <div class="flex-between"><div><h3>${esc(t.title)}</h3><p class="text-sm text-muted">${esc(t.description)}</p></div>
+          <div style="text-align:right"><span style="font-size:1.2rem;font-weight:700;color:var(--primary)">${t.points_min}${t.points_max>t.points_min?`-${t.points_max}`:''} 点</span><br><span class="text-sm text-muted">${t.period_type} ${t.period_value}次</span></div></div>
+        <div class="flex gap-1 mt-1">
+          <button class="btn btn-primary btn-sm" onclick="submitTask('${t.id}','${esc(t.title)}','${t.submission_type}')">提交任务</button>
+        </div></div>`;
+    }
+    if (!html) html = '<div class="card text-center text-muted">暂无可用任务</div>';
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+function submitTask(taskId, title, stype) {
+  const needsImage = stype === 'image' || stype === 'both';
+  const needsText = stype === 'text' || stype === 'both';
+
+  showModal(`提交: ${title}`, `
+    ${needsText ? `<div class="form-group"><label>文字内容</label><textarea id="st-text"></textarea></div>` : ''}
+    ${needsImage ? `
+      <div class="file-upload-area" id="file-area" onclick="document.getElementById('st-file').click()">
+        <p>📷 点击上传图片</p><input type="file" id="st-file" accept="image/*" onchange="previewFile(this)">
+        <img id="st-preview" class="preview-img hidden">
+      </div>` : ''}
+    <button class="btn btn-primary w-full" onclick="doSubmitTask('${taskId}')">提交</button>
+  `);
+}
+
+function previewFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  document.getElementById('file-area').classList.add('has-file');
+  const preview = document.getElementById('st-preview');
+  preview.classList.remove('hidden');
+  preview.src = URL.createObjectURL(file);
+  document.getElementById('file-area').querySelector('p').textContent = file.name;
+}
+
+async function doSubmitTask(taskId) {
+  try {
+    const fileInput = document.getElementById('st-file');
+    const file = fileInput?.files[0];
+    const text = document.getElementById('st-text')?.value || '';
+
+    if (file) {
+      await API.upload('/tasks/submit', file, { task_id: taskId, content_text: text });
+    } else {
+      await API.post('/tasks/submit', { task_id: taskId, content_text: text });
+    }
+    closeModal(); toast('任务提交成功，等待审核', 'success'); refreshStats();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 惊喜任务 ==========
+async function loadSurprise() {
+  try {
+    const d = await API.get('/random-tasks');
+    const groups = d.groups || [];
+    let html = '';
+
+    for (const g of groups) {
+      const periodName = g.group.period_type === 'daily' ? '今日' : g.group.period_type === 'weekly' ? '本周' : '本月';
+      if (g.can_draw) {
+        html += `<div class="card lottery-hero">
+          <h2>🎲 ${esc(g.group.name)}</h2>
+          <p class="cost">${periodName}惊喜任务 · 随机抽取一个神秘任务</p>
+          <button class="btn-lottery" onclick="drawSurprise('${g.group.id}')">✨ 抽取惊喜任务</button></div>`;
+      } else if (g.surprise_task) {
+        const st = g.surprise_task;
+        html += `<div class="card" style="border-color:var(--primary);background:var(--primary-light);">
+          <div class="flex-between"><div>
+            <h3>🎲 ${esc(g.group.name)} <span class="tag tag-approved">${periodName}任务已揭晓</span></h3>
+            <p><strong>${esc(st.title)}</strong></p>
+            <p class="text-sm text-muted">${esc(st.description||'')} · ${st.points_min}-${st.points_max} 点 · ${st.submission_type==='both'?'图文均可':st.submission_type==='image'?'需上传图片':'文字提交'}</p>
+          </div>
+          ${st.is_completed ? '<span class="tag tag-approved">已完成</span>' :
+            `<button class="btn btn-primary btn-sm" onclick="submitSurpriseTask('${st.ust_id}','${esc(st.title)}','${st.submission_type}')">去完成</button>`}
+          </div></div>`;
+      }
+    }
+
+    if (!html) html = '<div class="card text-center text-muted">暂无可用的随机任务组</div>';
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+function submitSurpriseTask(ustId, title, stype) {
+  const needsImage = stype === 'image' || stype === 'both';
+  const needsText = stype === 'text' || stype === 'both';
+  showModal(`惊喜任务: ${title}`, `
+    ${needsText ? `<div class="form-group"><label>文字内容</label><textarea id="st-text"></textarea></div>` : ''}
+    ${needsImage ? `
+      <div class="file-upload-area" id="file-area" onclick="document.getElementById('st-file').click()">
+        <p>📷 点击上传图片</p><input type="file" id="st-file" accept="image/*" onchange="previewFile(this)">
+        <img id="st-preview" class="preview-img hidden">
+      </div>` : ''}
+    <button class="btn btn-primary w-full" onclick="doSurpriseSubmit('${ustId}')">提交</button>
+  `);
+}
+
+async function drawSurprise(groupId) {
+  try {
+    const result = await API.post(`/random-tasks/draw/${groupId}`, {});
+    const st = result.surprise_task;
+    showModal('🎉 惊喜任务揭晓', `
+      <div class="draw-result">
+        <div class="result-icon">🎲</div>
+        <div class="result-name">${esc(st.title)}</div>
+        <p class="text-sm text-muted">${esc(st.description||'')}</p>
+        <p class="text-sm mt-1"><strong>${st.points_min}-${st.points_max}</strong> 点</p>
+      </div>
+      <button class="btn btn-primary w-full" onclick="closeModal();loadSurprise();">好的</button>
+    `);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function doSurpriseSubmit(ustId) {
+  try {
+    const fileInput = document.getElementById('st-file');
+    const file = fileInput?.files[0];
+    const text = document.getElementById('st-text')?.value || '';
+    if (file) {
+      await API.upload('/random-tasks/submit-surprise/' + ustId, file, { content_text: text });
+    } else {
+      await API.post('/random-tasks/submit-surprise/' + ustId, { content_text: text });
+    }
+    closeModal(); toast('提交成功，等待审核', 'success');
+    refreshStats(); loadSurprise();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 兑换中心 (商城 + 背包统一) ==========
+async function loadShop() {
+  try {
+    const me = window._me || await API.get('/auth/me'); window._me = me;
+    const [d, bp] = await Promise.all([
+      API.get('/shop/items'),
+      API.get('/lottery/backpack').catch(() => ({ backpack: [] })),
+    ]);
+
+    let html = `<p class="text-sm text-muted mb-2">当前余额: <strong style="color:${me.realtime_balance<0?'var(--danger)':'var(--primary)'}">${me.realtime_balance} 点</strong> ${me.realtime_balance<0?'<span style="color:var(--danger)">(负数无法兑换)</span>':''}</p>`;
+
+    // 背包物品 (常态显示)
+    const bpItems = (bp.backpack||[]).filter(i => !i.is_redeemed);
+    html += '<div class="card"><h3>🎒 背包物品 (可兑换)</h3>';
+    if (bpItems.length > 0) {
+      html += '<div class="backpack-grid">';
+      for (const i of bpItems) {
+        html += `<div class="backpack-item" onclick="redeemFromBackpack('${i.id}','${esc(i.item_name)}')">
+          <div style="font-size:2rem">${i.item_icon||'🎁'}</div>
+          <div style="font-weight:700;font-size:0.85rem">${esc(i.item_name)}</div>
+          <div><span class="tag tag-${i.rarity==='legendary'?'gold':i.rarity==='epic'?'approved':'info'}">${i.rarity}</span></div>
+          <div class="bp-count">x${i.quantity}</div></div>`;
+      }
+      html += '</div>';
+    } else {
+      html += '<p class="text-center text-muted">背包空空如也，去抽卡吧!</p>';
+    }
+    html += '</div>';
+
+    // 商城商品
+    html += '<div class="card"><h3>🛒 商城兑换</h3>';
+    for (const i of d.items||[]) {
+      const canBuy = me.realtime_balance >= i.points_required && me.realtime_balance >= 0;
+      html += `<div class="card" style="background:var(--surface2);"><div class="flex-between">
+        <div><strong>${esc(i.name)}</strong><br><span class="text-sm text-muted">${esc(i.description)}</span></div>
+        <div style="text-align:right"><span style="font-size:1.1rem;font-weight:700;color:var(--primary)">${i.points_required} 点</span><br><span class="text-sm text-muted">${i.stock===-1?'无限':`库存:${i.stock}`}</span></div></div>
+        <button class="btn btn-primary btn-sm mt-1" onclick="redeemItem('${i.id}','${esc(i.name)}',${i.points_required})" ${canBuy?'':'disabled'}>${canBuy?'立即兑换':'点数不足'}</button></div>`;
+    }
+    if (!d.items?.length && bpItems.length===0) html += '<p class="text-center text-muted">暂无可兑换项目</p>';
+    html += '</div>';
+
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+function redeemItem(itemId, name, points) {
+  showModal(`兑换: ${name}`, `
+    <p class="text-muted mb-2">将消耗 <strong style="color:var(--primary)">${points}</strong> 点</p>
+    <div class="form-group"><label>留言/备注</label><textarea id="rd-text"></textarea></div>
+    <div class="file-upload-area" id="file-area" onclick="document.getElementById('rd-file').click()">
+      <p>📷 上传凭证图片(可选)</p><input type="file" id="rd-file" accept="image/*" onchange="previewFile(this)">
+      <img id="st-preview" class="preview-img hidden">
+    </div>
+    <button class="btn btn-primary w-full" onclick="doRedeem('${itemId}')">确认兑换</button>
+  `);
+}
+
+async function doRedeem(itemId) {
+  try {
+    const fileInput = document.getElementById('rd-file');
+    const file = fileInput?.files[0];
+    const text = document.getElementById('rd-text')?.value || '';
+
+    if (file) {
+      await API.upload('/shop/redeem', file, { item_id: itemId, content_text: text });
+    } else {
+      await API.post('/shop/redeem', { item_id: itemId, content_text: text });
+    }
+    closeModal(); toast('兑换申请已提交，等待审核', 'success'); refreshStats();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 记录 ==========
+async function loadHistory() {
+  try {
+    const [subs, orders, ledger, drawHistory, bpRedeems] = await Promise.all([
+      API.get('/tasks/submissions'), API.get('/shop/orders'),
+      API.get('/admin/points/my-ledger').catch(() => ({ entries: [], realtime_balance: 0 })),
+      API.get('/lottery/history').catch(() => ({ draws: [] })),
+      API.get('/lottery/backpack-redemptions').catch(() => ({ redemptions: [] })),
+    ]);
+
+    let html = '<div class="card"><h3>📋 任务提交记录</h3><div class="table-wrap"><table><thead><tr><th>任务</th><th>内容</th><th>状态</th><th>点数</th><th>时间</th></tr></thead><tbody>';
+    for (const s of subs.submissions||[]) {
+      html += `<tr><td>${esc(s.task_title)}</td><td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;">${esc(s.content_text)||'-'}</td>
+        <td><span class="tag tag-${s.status}">${s.status==='pending'?'待审':s.status==='approved'?'通过':'拒绝'}</span></td>
+        <td>${s.awarded_points?`+${s.awarded_points}`:'-'}</td><td>${fmtDate(s.created_at)}</td></tr>`;
+    }
+    html += '</tbody></table></div></div>';
+
+    html += '<div class="card"><h3>🛒 兑换记录</h3><div class="table-wrap"><table><thead><tr><th>类型</th><th>物品</th><th>点数</th><th>状态</th><th>时间</th></tr></thead><tbody>';
+    for (const o of orders.orders||[]) {
+      html += `<tr><td><span class="tag tag-info">商品</span></td><td>${esc(o.item_name)}</td><td>-${o.points_spent}</td>
+        <td><span class="tag tag-${o.status}">${o.status==='pending'?'待审':o.status==='approved'?'通过':'拒绝'}</span></td>
+        <td>${fmtDate(o.created_at)}</td></tr>`;
+    }
+    for (const r of bpRedeems.redemptions||[]) {
+      html += `<tr><td><span class="tag tag-${r.rarity==='legendary'?'gold':'info'}">背包</span></td><td>${r.item_icon||''} ${esc(r.item_name)}</td><td>-</td>
+        <td><span class="tag tag-${r.status}">${r.status==='pending'?'待审':r.status==='approved'?'通过':'拒绝'}</span></td>
+        <td>${fmtDate(r.created_at)}</td></tr>`;
+    }
+    html += '</tbody></table></div></div>';
+
+    html += '<div class="card"><h3>📊 点数流水</h3><p class="text-sm text-muted mb-2">每笔点数的过期时间 · 已过期/已消耗的不计入余额</p><div class="table-wrap"><table><thead><tr><th>类型</th><th>金额</th><th>描述</th><th>过期时间</th><th>状态</th><th>时间</th></tr></thead><tbody>';
+    const now = new Date();
+    for (const e of (ledger.entries||[]).slice(0, 50)) {
+      const expired = e.expires_at && new Date(e.expires_at) < now;
+      const expiring = e.expires_at && !expired && (new Date(e.expires_at) - now) < 7*86400000;
+      html += `<tr style="${expired?'opacity:0.5':''}"><td><span class="tag">${e.type}</span></td>
+        <td style="color:${e.amount>0?'var(--success)':'var(--danger)'}">${e.amount>0?'+':''}${e.amount}</td>
+        <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;">${esc(e.description)}</td>
+        <td class="text-sm">${e.expires_at?fmtDate(e.expires_at):'永不过期'}</td>
+        <td>${e.amount <= 0 ? '<span class="tag tag-rejected">已消耗</span>' : expired ? '<span class="tag tag-rejected">已过期</span>' : expiring ? '<span class="tag tag-pending">即将过期</span>' : '<span class="tag tag-active">有效</span>'}</td>
+        <td>${fmtDate(e.created_at)}</td></tr>`;
+    }
+    html += '</tbody></table></div></div>';
+
+    // 抽卡记录
+    if (drawHistory.draws?.length) {
+      html += '<div class="card"><h3>🎰 抽卡记录</h3><div class="table-wrap"><table><thead><tr><th>物品</th><th>稀有度</th><th>保底</th><th>时间</th></tr></thead><tbody>';
+      for (const d of drawHistory.draws.slice(0, 20)) {
+        html += `<tr><td>${d.item_icon||''} ${esc(d.item_name)}</td>
+          <td><span class="tag tag-${d.rarity==='legendary'?'gold':d.rarity==='epic'?'approved':'info'}">${d.rarity}</span></td>
+          <td>${d.is_pity?'<span class="tag tag-gold">保底</span>':'第'+d.draw_index+'抽'}</td>
+          <td>${fmtDate(d.created_at)}</td></tr>`;
+      }
+      html += '</tbody></table></div></div>';
+    }
+
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+// ========== 贷款 ==========
+async function loadLoans() {
+  try {
+    const d = await API.get('/loans/my');
+    const loans = d.loans || [];
+    let html = `<div class="card"><div class="flex-between mb-2"><h3>💳 贷款中心</h3>
+      <button class="btn btn-primary btn-sm" onclick="showBorrowModal()">申请贷款</button></div>`;
+
+    // 活跃贷款
+    const active = loans.filter(l => l.status === 'active');
+    if (active.length > 0) {
+      html += '<h4 class="mb-1">活跃贷款</h4>';
+      for (const l of active) {
+        html += `<div class="card" style="background:var(--surface2);">
+          <div class="flex-between"><div><strong>借款 ${l.principal} 点</strong> | 剩余 <span style="color:var(--warn)">${l.remaining}</span> 点 | 周利率 ${(l.weekly_interest_rate*100).toFixed(1)}%</div>
+          <span class="text-sm text-muted">${fmtDate(l.borrowed_at)}</span></div>
+          <button class="btn btn-success btn-sm mt-1" onclick="showRepayModal('${l.id}',${l.remaining})">还款</button></div>`;
+      }
+    }
+
+    // 历史
+    html += '<h4 class="mb-1 mt-2">贷款记录</h4><div class="table-wrap"><table><thead><tr><th>本金</th><th>剩余</th><th>周利率</th><th>状态</th><th>时间</th></tr></thead><tbody>';
+    for (const l of loans) {
+      html += `<tr><td>${l.principal}</td><td>${l.remaining}</td><td>${(l.weekly_interest_rate*100).toFixed(1)}%</td>
+        <td><span class="tag tag-${l.status}">${l.status==='active'?'活跃':l.status==='repaid'?'已还':'违约'}</span></td>
+        <td>${fmtDate(l.borrowed_at)}</td></tr>`;
+    }
+    html += '</tbody></table></div></div>';
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+function showBorrowModal() {
+  showModal('申请贷款', `
+    <div class="form-group"><label>借款金额(点数)</label><input type="number" id="br-amount" min="1"></div>
+    <p class="text-sm text-muted mb-2">贷款每周产生利息，超过30天未还将被处以双倍罚息!</p>
+    <button class="btn btn-primary w-full" onclick="doBorrow()">确认借款</button>
+  `);
+}
+
+async function doBorrow() {
+  try {
+    const amount = parseInt(document.getElementById('br-amount').value);
+    await API.post('/loans/borrow', { amount });
+    closeModal(); toast('借款成功!', 'success'); refreshStats(); loadLoans();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function showRepayModal(loanId, remaining) {
+  showModal('偿还贷款', `
+    <p class="mb-2">当前待还: <strong style="color:var(--warn)">${remaining}</strong> 点</p>
+    <div class="form-group"><label>还款金额</label><input type="number" id="rp-amount" value="${remaining}" max="${remaining}"></div>
+    <button class="btn btn-primary w-full" onclick="doRepay('${loanId}')">确认还款</button>
+  `);
+}
+
+async function doRepay(loanId) {
+  try {
+    const amount = parseInt(document.getElementById('rp-amount').value);
+    await API.post('/loans/repay', { loan_id: loanId, amount });
+    closeModal(); toast('还款成功!', 'success'); refreshStats(); loadLoans();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 抽奖中心 ==========
+async function loadLottery() {
+  try {
+    const pool = await API.get('/lottery/items');
+    const me = window._me || await API.get('/auth/me'); window._me = me;
+    const basePity = pityCache || { current: 0, max: 80, targetItemName: '', cost: pool.cost };
+    const pityPct = basePity.max > 0 ? Math.min(100, (basePity.current / basePity.max) * 100) : 0;
+    const canMulti = me.realtime_balance >= pool.cost * 10 && basePity.current < basePity.max - 10;
+    const multiLabel = basePity.current >= basePity.max - 10 ? '保底临近, 仅支持单抽' : (me.realtime_balance < pool.cost * 10 ? '点数不足' : '🔥 十连抽');
+
+    let html = `<div class="lottery-hero">
+      <h2>🎰 幸运转盘</h2>
+      <p class="cost">单抽消耗 <strong>${pool.cost}</strong> 点 | 十连消耗 <strong>${pool.cost * 10}</strong> 点 | 余额: <strong style="color:${me.realtime_balance<0?'var(--danger)':'var(--primary)'}">${me.realtime_balance}</strong> 点</p>
+      <div class="flex gap-1" style="justify-content:center;">
+        <button class="btn-lottery lottery-draw-btn" onclick="doDraw(${pool.cost})" ${me.realtime_balance < pool.cost ? 'disabled' : ''}>
+          ${me.realtime_balance < pool.cost ? '点数不足' : '✨ 单抽'}
+        </button>
+        <button class="btn-lottery lottery-draw-btn" onclick="doMultiDraw(${pool.cost * 10})" ${canMulti ? '' : 'disabled'} style="background:linear-gradient(135deg,#e67e22,#f59e0b);box-shadow:0 4px 16px rgba(230,126,34,0.35);">
+          ${multiLabel}
+        </button>
+      </div>
+      <div class="lottery-pity mt-1">
+        保底进度: <strong id="pity-progress">${basePity.current}/${basePity.max}</strong>
+        <span id="pity-target" class="${basePity.targetItemName ? '' : 'hidden'}"> · 保底奖励: <strong id="pity-target-name" style="color:var(--warn)">${esc(basePity.targetItemName || '')}</strong></span>
+      </div>
+      <div class="pity-bar-wrap"><div class="pity-bar-fill" id="pity-bar" style="width:${pityPct}%"></div></div>
+    </div>`;
+
+    // 奖品展示
+    html += '<div class="card"><h3>📦 可抽奖品池</h3><div class="prize-grid">';
+    for (const i of pool.items) {
+      const isRare = i.rarity === 'legendary' || i.rarity === 'epic';
+      const isPoints = i.reward_type === 'points';
+      html += `<div class="prize-card${isRare?' rare':''}">
+        <div class="prize-icon">${isPoints?'💰':(i.icon||'🎁')}</div>
+        <div class="prize-name">${esc(i.name)}</div>
+        <div><span class="tag tag-${i.rarity==='legendary'?'gold':i.rarity==='epic'?'approved':i.rarity==='rare'?'pending':'info'}">${i.rarity}</span></div>
+        ${isPoints ? `<div class="prize-prob prize-prob-high">直接获得 <strong>${i.points_amount||0}点</strong></div>` : ''}
+        <div class="prize-prob${isRare&&!isPoints?' prize-prob-high':''}">${(i.probability*100).toFixed(2)}%</div>
+        ${i.description ? `<div class="text-sm text-muted">${esc(i.description)}</div>` : ''}
+      </div>`;
+    }
+    html += '</div></div>';
+
+    html += '<div id="lottery-history"></div>';
+    setContent(html);
+    refreshPity(pool.cost);
+    loadLotteryHistory();
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+async function doDraw(cost) {
+  try {
+    if (drawBusy) { toast('正在抽卡，请稍候...', 'info'); return; }
+    const me = window._me || await API.get('/auth/me');
+    if (me.realtime_balance < cost) { toast('点数不足!', 'error'); return; }
+
+    setDrawBusy(true, '单抽进行中...');
+
+    const result = await API.post('/lottery/draw', {});
+    const item = result.item;
+    const isPoints = item.reward_type === 'points';
+
+    if (!pityCache) pityCache = { current: result.pity_progress.current, max: result.pity_progress.max, targetItemName: '' };
+    else pityCache = { ...pityCache, current: result.pity_progress.current, max: result.pity_progress.max };
+    applyPityUI(pityCache);
+
+    setDrawBusy(false);
+
+    showModal('🎉 抽卡结果', `
+      <div class="draw-result">
+        <div class="result-icon">${isPoints?'💰':(item.icon||'🎁')}</div>
+        <div class="result-name">${esc(item.name)}</div>
+        ${isPoints ? `<p style="font-size:1.4rem;font-weight:800;color:var(--primary);margin:8px 0;">+${item.points_amount||0} 点</p>` : ''}
+        <div class="result-rarity tag tag-${item.rarity==='legendary'?'gold':item.rarity==='epic'?'approved':item.rarity==='rare'?'pending':'info'}">${item.rarity}${result.is_pity?' · ⭐保底':''}</div>
+        <p class="text-sm text-muted">${esc(item.description)}</p>
+        <p class="text-sm mt-1">余额: <strong style="color:var(--primary)">${result.balance_after}</strong> 点 | 保底进度: ${result.pity_progress.current}/${result.pity_progress.max}</p>
+      </div>
+      <button class="btn btn-primary w-full" onclick="refreshAfterDraw()">好的</button>
+    `);
+  } catch(e) {
+    setDrawBusy(false);
+    toast(e.message, 'error');
+  }
+}
+
+async function refreshAfterDraw() {
+  closeModal();
+  await refreshStats();
+  await loadLottery();
+}
+
+async function doMultiDraw(cost) {
+  try {
+    if (drawBusy) { toast('正在抽卡，请稍候...', 'info'); return; }
+    const me = window._me || await API.get('/auth/me');
+    if (me.realtime_balance < cost) { toast('点数不足!', 'error'); return; }
+
+    setDrawBusy(true, '十连抽进行中...');
+
+    const result = await API.post('/lottery/draw-multi', {});
+    const items = result.items || [];
+
+    if (!pityCache) pityCache = { current: result.pity_progress.current, max: result.pity_progress.max, targetItemName: '' };
+    else pityCache = { ...pityCache, current: result.pity_progress.current, max: result.pity_progress.max };
+    applyPityUI(pityCache);
+
+    setDrawBusy(false);
+
+    let html = `<div style="text-align:center;"><h3>🔥 十连抽结果</h3>
+      ${result.points_gained > 0 ? `<p style="font-size:1.2rem;font-weight:700;color:var(--primary);">共获得 ${result.points_gained} 点!</p>` : ''}
+      ${result.pity_count > 0 ? `<p style="color:var(--warn);">⭐ 触发 ${result.pity_count} 次保底!</p>` : ''}
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:16px 0;">`;
+    for (const r of items) {
+      const isPoints = r.reward_type === 'points';
+      html += `<div style="background:var(--surface2);border-radius:var(--radius);padding:8px 4px;text-align:center;${r.rarity==='legendary'?'border:2px solid #f59e0b;':r.rarity==='epic'?'border:1px solid var(--primary);':''}">
+        <div style="font-size:1.5rem;">${isPoints?'💰':(r.icon||'🎁')}</div>
+        <div style="font-size:0.7rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.name)}</div>
+        ${isPoints ? `<div style="font-size:0.7rem;color:var(--primary);font-weight:700;">+${r.points_amount}</div>` : ''}
+        <span class="tag tag-${r.rarity==='legendary'?'gold':r.rarity==='epic'?'approved':r.rarity==='rare'?'pending':'info'}" style="font-size:0.6rem;padding:1px 4px;">${r.rarity}${r.is_pity?'⭐':''}</span>
+      </div>`;
+    }
+    html += `</div>
+      <p class="text-sm text-muted">余额: <strong style="color:var(--primary)">${result.balance_after}</strong> 点 | 保底进度: ${result.pity_progress.current}/${result.pity_progress.max}</p></div>
+      <button class="btn btn-primary w-full" onclick="refreshAfterDraw()">好的</button>`;
+    showModal('🔥 十连抽结果', html);
+  } catch(e) {
+    setDrawBusy(false);
+    toast(e.message, 'error');
+  }
+}
+
+// ========== 背包 ==========
+async function loadBackpack() {
+  try {
+    const bp = await API.get('/lottery/backpack');
+    const items = bp.backpack || [];
+    const available = items.filter(i => !i.is_redeemed);
+    const redeemed = items.filter(i => i.is_redeemed);
+
+    let html = `<div class="card"><div class="flex-between mb-2"><h3>🎒 我的背包 (${available.reduce((s,i)=>s+i.quantity,0)}件)</h3></div>`;
+
+    if (available.length === 0) {
+      html += '<p class="text-center text-muted">背包空空如也，去抽卡吧!</p>';
+    } else {
+      html += '<div class="backpack-grid">';
+      for (const i of available) {
+        html += `<div class="backpack-item" onclick="redeemFromBackpack('${i.id}','${esc(i.item_name)}')">
+          <div style="font-size:2rem">${i.item_icon||'🎁'}</div>
+          <div style="font-weight:700;font-size:0.85rem">${esc(i.item_name)}</div>
+          <div><span class="tag tag-${i.rarity==='legendary'?'gold':i.rarity==='epic'?'approved':'info'}">${i.rarity}</span></div>
+          <div class="bp-count">x${i.quantity}</div>
+        </div>`;
+      }
+      html += '</div>';
+    }
+
+    // 已兑换记录
+    if (redeemed.length > 0) {
+      html += `<h4 class="mt-2 mb-1">✅ 已兑换 (${redeemed.length}件)</h4>
+      <div class="table-wrap"><table><thead><tr><th>物品</th><th>稀有度</th><th>获得时间</th></tr></thead><tbody>`;
+      for (const i of redeemed) {
+        html += `<tr><td>${i.item_icon||''} ${esc(i.item_name)}</td>
+          <td><span class="tag tag-${i.rarity==='legendary'?'gold':'info'}">${i.rarity}</span></td>
+          <td>${fmtDate(i.created_at)}</td></tr>`;
+      }
+      html += '</tbody></table></div>';
+    }
+
+    html += '</div>';
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+function redeemFromBackpack(bpId, itemName) {
+  showModal(`兑换: ${itemName}`, `
+    <p class="text-muted mb-2">请上传兑换凭证（图片/文字），管理员审核后完成兑换</p>
+    <div class="form-group"><label>留言/备注</label><textarea id="bp-text"></textarea></div>
+    <div class="file-upload-area" id="file-area" onclick="document.getElementById('bp-file').click()">
+      <p>📷 上传凭证图片</p><input type="file" id="bp-file" accept="image/*" onchange="previewFile(this)">
+      <img id="st-preview" class="preview-img hidden">
+    </div>
+    <button class="btn btn-primary w-full" onclick="doBackpackRedeem('${bpId}')">提交兑换申请</button>
+  `);
+}
+
+async function doBackpackRedeem(bpId) {
+  try {
+    const fileInput = document.getElementById('bp-file');
+    const file = fileInput?.files[0];
+    const text = document.getElementById('bp-text')?.value || '';
+
+    if (file) {
+      await API.upload('/lottery/backpack/redeem', file, { backpack_id: bpId, content_text: text });
+    } else {
+      await API.post('/lottery/backpack/redeem', { backpack_id: bpId, content_text: text });
+    }
+    closeModal(); toast('兑换申请已提交，等待审核', 'success'); refreshStats(); loadShop();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 工具 ==========
+function setContent(html) { document.getElementById('tab-content').innerHTML = html; }
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtDate(d) { if (!d) return '-'; return new Date(d).toLocaleString('zh-CN'); }
+function showModal(title, body) {
+  document.getElementById('modal-container').innerHTML = `
+    <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+      <div class="modal"><div class="flex-between mb-2"><h3>${title}</h3><button class="btn btn-outline btn-sm" onclick="closeModal()">✕</button></div>${body}</div></div>`;
+}
+function closeModal() { document.getElementById('modal-container').innerHTML = ''; }
+
+// bootstrapAuth 会自动处理已登录状态
+</script>
+</body>
+</html>

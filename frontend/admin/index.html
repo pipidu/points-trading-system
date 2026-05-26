@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>点数交易系统 - 管理后台</title>
+<link rel="stylesheet" href="/shared/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 登录页面 -->
+  <div id="login-page" class="login-page">
+    <div class="login-card">
+      <h2>🔐 管理员登录</h2>
+      <form id="login-form">
+        <div class="form-group"><label>用户名</label><input type="text" id="login-username" required autocomplete="username"></div>
+        <div class="form-group"><label>密码</label><input type="password" id="login-password" required autocomplete="current-password"></div>
+        <button type="submit" class="btn btn-primary w-full">登录</button>
+      </form>
+      <p id="login-error" class="text-sm" style="color:var(--danger);margin-top:12px;"></p>
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="main-page" class="hidden">
+    <header class="header">
+      <div class="app-container header-inner">
+        <h1>⚡ 管理后台</h1>
+        <div class="user-info">
+          <span id="admin-name"></span>
+          <button class="btn btn-outline btn-sm" onclick="location.reload()">🔄 刷新</button>
+          <button class="btn btn-outline btn-sm" onclick="logout()">退出</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-container" style="padding-top:20px;">
+      <!-- 统计仪表盘 -->
+      <div class="stats-grid" id="dashboard-stats"></div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="users">👥 用户管理</button>
+        <button class="tab-btn" data-tab="tasks">📋 任务管理</button>
+        <button class="tab-btn" data-tab="submissions">📝 任务审核</button>
+        <button class="tab-btn" data-tab="shop">🛒 商品管理</button>
+        <button class="tab-btn" data-tab="orders">📦 兑换审核</button>
+        <button class="tab-btn" data-tab="lottery">🎰 抽奖管理</button>
+        <button class="tab-btn" data-tab="loans">💰 贷款管理</button>
+        <button class="tab-btn" data-tab="task-groups">🎲 随机任务组</button>
+        <button class="tab-btn" data-tab="settings">⚙️ 系统设置</button>
+        <button class="tab-btn" data-tab="logs">📜 操作日志</button>
+      </div>
+
+      <!-- Tab 内容区 -->
+      <div id="tab-content"></div>
+    </div>
+  </div>
+
+  <!-- Modal 容器 -->
+  <div id="modal-container"></div>
+
+  <!-- 图片查看器 -->
+  <div id="img-viewer" class="hidden"></div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/shared/api.js"></script>
+<script>
+// ========== 全局状态 ==========
+let currentTab = 'users';
+let filterUserId = localStorage.getItem('filterUserId') || '';
+let filterUserName = localStorage.getItem('filterUserName') || '';
+
+function saveUserFilter(uid, uname) {
+  filterUserId = uid; filterUserName = uname;
+  localStorage.setItem('filterUserId', uid);
+  localStorage.setItem('filterUserName', uname);
+}
+
+function userFilterHtml() {
+  return `<div class="user-filter-bar">
+    <span class="text-sm text-muted user-filter-label">筛选用户:</span>
+    <input type="text" id="uf-input" placeholder="输入用户名搜索…" value="${esc(filterUserName)}"
+      class="user-filter-input"
+      onkeyup="if(event.key==='Enter')searchUserFilter()">
+    <button class="btn btn-sm btn-primary" onclick="searchUserFilter()">查询</button>
+    ${filterUserId ? `<button class="btn btn-sm btn-outline" onclick="saveUserFilter('','');refreshCurrentTab()">✕ 清除</button>` : ''}
+  </div>`;
+}
+
+async function searchUserFilter() {
+  const q = document.getElementById('uf-input').value.trim();
+  if (!q) { saveUserFilter('',''); refreshCurrentTab(); return; }
+  const d = await API.get(`/auth/users?search=${encodeURIComponent(q)}`).catch(()=>({users:[]}));
+  if (!d.users?.length) { toast('未找到用户','error'); return; }
+  if (d.users.length === 1) {
+    const u = d.users[0];
+    saveUserFilter(u.id, u.display_name || u.username);
+    refreshCurrentTab();
+    return;
+  }
+  let html = '<div style="max-height:200px;overflow-y:auto;">';
+  for (const u of d.users) {
+    html += `<div style="padding:8px;cursor:pointer;border-bottom:1px solid var(--border);" onclick="saveUserFilter('${u.id}','${esc(u.display_name||u.username)}');closeModal();refreshCurrentTab()">${esc(u.display_name||u.username)} <span class="text-sm text-muted">@${esc(u.username)}</span></div>`;
+  }
+  html += '</div>';
+  showModal('选择用户', html);
+}
+
+function refreshCurrentTab() {
+  const loaders = {
+    submissions: loadSubmissions, orders: loadOrders, 'bp-redeem': loadBpRedemptions,
+  };
+  if (loaders[currentTab]) loaders[currentTab]();
+}
+
+function userFilterParam() {
+  return filterUserId ? `&user_id=${encodeURIComponent(filterUserId)}` : '';
+}
+
+// ========== Toast ==========
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`; el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ========== 登录 ==========
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const data = await API.post('/auth/login', {
+      username: document.getElementById('login-username').value,
+      password: document.getElementById('login-password').value,
+    });
+    if (data.user.role !== 'admin') throw new Error('非管理员账号');
+    API.setToken(data.token); API.user = data.user;
+    localStorage.setItem('login_mode', 'admin');
+    document.getElementById('login-page').classList.add('hidden');
+    document.getElementById('main-page').classList.remove('hidden');
+    document.getElementById('admin-name').textContent = data.user.display_name || data.user.username;
+    initAdmin();
+  } catch (err) {
+    document.getElementById('login-error').textContent = err.message;
+  }
+});
+
+function logout() { API.setToken(''); API.user = null; localStorage.removeItem('login_mode'); sessionStorage.removeItem('admin_me'); location.href = '/'; }
+
+// ========== 初始化 ==========
+async function initAdmin() {
+  if (!API.isLoggedIn) return;
+  const hashTab = location.hash.replace('#', '');
+  const validTabs = ['users','tasks','submissions','shop','orders','lottery','bp-redeem','task-groups','loans','settings','logs'];
+  switchTab(validTabs.includes(hashTab) ? hashTab : 'users');
+  // 异步加载仪表盘
+  loadDashboard();
+}
+
+async function bootstrapAuth() {
+  if (!API.isLoggedIn) return;
+  // 快速缓存恢复
+  const cached = sessionStorage.getItem('admin_me');
+  if (cached) {
+    try {
+      const me = JSON.parse(cached);
+      const now = Date.now();
+      if (now - (me._ts || 0) < 30000) {
+        API.user = { id: me.id, username: me.username, role: me.role, display_name: me.display_name };
+        document.getElementById('login-page').classList.add('hidden');
+        document.getElementById('main-page').classList.remove('hidden');
+        document.getElementById('admin-name').textContent = me.display_name || me.username;
+        initAdmin();
+        return;
+      }
+    } catch {}
+  }
+  try {
+    const me = await API.get('/auth/me');
+    const mode = localStorage.getItem('login_mode') || '';
+    if (me.role !== 'admin') { location.href = '/user/'; return; }
+    if (mode === 'user') { location.href = '/user/'; return; }
+    me._ts = Date.now();
+    sessionStorage.setItem('admin_me', JSON.stringify(me));
+    API.user = { id: me.id, username: me.username, role: me.role, display_name: me.display_name };
+    document.getElementById('login-page').classList.add('hidden');
+    document.getElementById('main-page').classList.remove('hidden');
+    document.getElementById('admin-name').textContent = me.display_name || me.username;
+    initAdmin();
+  } catch {
+    API.setToken('');
+  }
+}
+
+bootstrapAuth();
+
+// Tabs
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+function switchTab(tab) {
+  currentTab = tab;
+  location.hash = '#' + tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  const activeBtn = document.querySelector(`[data-tab="${tab}"]`);
+  if (activeBtn) activeBtn.classList.add('active');
+  const loaders = {
+    users: loadUsers, tasks: loadTasks, submissions: loadSubmissions,
+    shop: loadShopItems, orders: loadOrders, lottery: loadLottery, 'bp-redeem': loadBpRedemptions,
+    'task-groups': loadTaskGroups, loans: loadLoans, settings: loadSettings, logs: loadLogs,
+  };
+  if (loaders[tab]) loaders[tab]();
+}
+
+async function loadDashboard() {
+  try { const [d, ls] = await Promise.all([
+    API.get('/admin/dashboard'),
+    API.get('/lottery/admin/stats').catch(() => ({})),
+  ]);
+    document.getElementById('dashboard-stats').innerHTML = `
+      <div class="stat-card"><div class="num">${d.total_users}</div><div class="label">用户总数</div></div>
+      <div class="stat-card"><div class="num">${d.pending_submissions}</div><div class="label">待审核任务</div></div>
+      <div class="stat-card"><div class="num">${d.pending_orders}</div><div class="label">待审核兑换</div></div>
+      <div class="stat-card"><div class="num">${d.active_loans}</div><div class="label">活跃贷款</div></div>
+      <div class="stat-card"><div class="num">${ls.total_draws||0}</div><div class="label">总抽卡次数</div></div>
+      <div class="stat-card"><div class="num">${ls.pending_redemptions||0}</div><div class="label">待审背包兑换</div></div>
+      <div class="stat-card"><div class="num">${d.total_tasks}</div><div class="label">活跃任务</div></div>
+      <div class="stat-card"><div class="num">${d.total_items}</div><div class="label">可兑换商品</div></div>
+    `;
+  } catch {}
+}
+
+// ========== 用户管理 ==========
+async function loadUsers(page = 1) {
+  try { const d = await API.get(`/auth/users?page=${page}`);
+    let html = `<div class="card"><div class="flex-between mb-2">
+      <h3>用户列表 (共 ${d.total} 人)</h3>
+      <button class="btn btn-primary btn-sm" onclick="showCreateUserModal()">+ 创建用户</button></div>
+      <div class="table-wrap"><table><thead><tr>
+        <th>用户名</th><th>显示名</th><th>角色</th><th>创建时间</th><th>操作</th>
+      </tr></thead><tbody>`;
+    for (const u of d.users) {
+      html += `<tr>
+        <td>${esc(u.username)}</td><td>${esc(u.display_name)}</td>
+        <td><span class="tag tag-${u.role === 'admin' ? 'approved' : 'active'}">${u.role}</span></td>
+        <td>${fmtDate(u.created_at)}</td>
+        <td>
+          <button class="btn btn-outline btn-sm" onclick="showUserBalance('${u.id}','${esc(u.username)}')">点数</button>
+          <button class="btn btn-outline btn-sm" onclick="showAdjustPoints('${u.id}','${esc(u.username)}')">调整</button>
+          <button class="btn btn-outline btn-sm" onclick="showUserLedger('${u.id}','${esc(u.username)}')">流水</button>
+          <button class="btn btn-outline btn-sm" onclick="showEditUser('${u.id}','${esc(u.username)}','${esc(u.display_name)}','${u.role}')">编辑</button>
+          ${u.role !== 'admin' ? `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}','${esc(u.username)}')">删除</button>` : ''}
+        </td></tr>`;
+    }
+    html += `</tbody></table></div>${pager(page, d.total, 20, 'loadUsers')}</div>`;
+    setContent(html);
+  } catch(err) { setContent(`<div class="card"><p style="color:var(--danger)">加载失败: ${err.message}</p></div>`); }
+}
+
+function showCreateUserModal() {
+  showModal('创建用户', `
+    <div class="form-group"><label>用户名</label><input type="text" id="new-username"></div>
+    <div class="form-group"><label>密码</label><input type="password" id="new-password"></div>
+    <div class="form-group"><label>显示名称</label><input type="text" id="new-display"></div>
+    <button class="btn btn-primary w-full" onclick="createUser()">创建</button>
+  `);
+}
+
+async function createUser() {
+  try {
+    await API.post('/auth/create-user', {
+      username: document.getElementById('new-username').value,
+      password: document.getElementById('new-password').value,
+      display_name: document.getElementById('new-display').value,
+    });
+    closeModal(); toast('用户创建成功', 'success'); loadUsers();
+  } catch(err) { toast(err.message, 'error'); }
+}
+
+function showEditUser(uid, uname, dname, role) {
+  showModal(`编辑用户: ${uname}`, `
+    <div class="form-group"><label>用户名</label><input type="text" id="eu-username" value="${esc(uname)}"></div>
+    <div class="form-group"><label>显示名称</label><input type="text" id="eu-display" value="${esc(dname)}"></div>
+    <div class="form-group"><label>角色</label><select id="eu-role">
+      <option value="user" ${role==='user'?'selected':''}>普通用户</option>
+      <option value="admin" ${role==='admin'?'selected':''}>管理员</option>
+    </select></div>
+    <div class="form-group"><label>新密码 (留空不修改)</label><input type="password" id="eu-password" placeholder="留空则不修改密码"></div>
+    <button class="btn btn-primary w-full" onclick="doEditUser('${uid}')">保存修改</button>
+  `);
+}
+
+async function doEditUser(uid) {
+  try {
+    const body = {
+      username: document.getElementById('eu-username').value,
+      display_name: document.getElementById('eu-display').value,
+      role: document.getElementById('eu-role').value,
+    };
+    const pwd = document.getElementById('eu-password').value;
+    if (pwd) body.password = pwd;
+    await API.put(`/auth/users/${uid}`, body);
+    closeModal(); toast('用户已更新', 'success'); loadUsers();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function deleteUser(uid, uname) {
+  if (!confirm(`确认删除用户「${uname}」及其所有数据?\n此操作不可撤销!`)) return;
+  try {
+    await API.del(`/auth/users/${uid}`);
+    toast(`用户「${uname}」已删除`, 'success'); loadUsers();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function showUserBalance(uid, uname) {
+  try { const d = await API.get(`/admin/points/balance/${uid}`);
+    showModal(`${uname} 的余额`, `<p style="font-size:2rem;font-weight:800;text-align:center;">${d.realtime_balance} 点</p>`);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function showAdjustPoints(uid, uname) {
+  showModal(`调整 ${uname} 的点数`, `
+    <div class="form-group"><label>金额 (正数=增加, 负数=扣减)</label><input type="number" id="adj-amount"></div>
+    <div class="form-group"><label>原因</label><input type="text" id="adj-reason"></div>
+    <div class="form-group"><label>有效期(秒, 0=永久)</label><input type="number" id="adj-expiry" value="0"></div>
+    <button class="btn btn-primary w-full" onclick="doAdjust('${uid}')">确认调整</button>
+  `);
+}
+
+async function doAdjust(uid) {
+  try {
+    const amount = parseInt(document.getElementById('adj-amount').value);
+    const expiry = parseInt(document.getElementById('adj-expiry').value) || null;
+    await API.post('/admin/points/adjust', {
+      user_id: uid, amount,
+      description: document.getElementById('adj-reason').value,
+      expiry_seconds: expiry,
+    });
+    closeModal(); toast('点数调整成功', 'success');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function showUserLedger(uid, uname) {
+  try {
+    const [d, draws] = await Promise.all([
+      API.get(`/admin/points/ledger/${uid}`),
+      API.get(`/lottery/admin/draws/${uid}?page=1`).catch(()=>({draws:[],total:0})),
+    ]);
+    let html = `<h3>${uname} 点数流水 (实时余额: <span style="color:${d.realtime_balance<0?'var(--danger)':'var(--primary)'}">${d.realtime_balance}</span> 点)</h3>
+    <p class="text-sm text-muted mb-2">共 ${d.total} 条点数记录</p>
+    <div class="table-wrap"><table><thead><tr>
+      <th>类型</th><th>金额</th><th>描述</th><th>过期时间</th><th>状态</th><th>时间</th></tr></thead><tbody>`;
+    const now = new Date();
+    for (const e of d.entries) {
+      const expired = e.expires_at && new Date(e.expires_at) < now;
+      const expiring = e.expires_at && !expired && (new Date(e.expires_at) - now) < 7*86400000;
+      html += `<tr style="${expired?'opacity:0.5':''}">
+        <td><span class="tag">${e.type}</span></td>
+        <td style="color:${e.amount>0?'var(--success)':'var(--danger)'}">${e.amount>0?'+':''}${e.amount}</td>
+        <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;">${esc(e.description)}</td>
+        <td>${e.expires_at ? fmtDate(e.expires_at) : '永不过期'}</td>
+        <td>${e.amount <= 0 ? '<span class="tag tag-rejected">已消耗</span>' : expired ? '<span class="tag tag-rejected">已过期</span>' : expiring ? '<span class="tag tag-pending">即将过期</span>' : '<span class="tag tag-active">有效</span>'}</td>
+        <td>${fmtDate(e.created_at)}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+
+    if (draws.draws?.length) {
+      html += `<h4 class="mt-2">🎰 抽卡记录 (${draws.total||draws.draws.length}次)</h4>
+      <div class="table-wrap"><table><thead><tr><th>物品</th><th>稀有度</th><th>消耗</th><th>保底</th><th>时间</th></tr></thead><tbody>`;
+      for (const r of draws.draws.slice(0,30)) {
+        html += `<tr><td>${r.item_icon||''} ${esc(r.item_name)}</td>
+          <td><span class="tag tag-${r.rarity==='legendary'?'gold':r.rarity==='epic'?'approved':'info'}">${r.rarity}</span></td>
+          <td style="color:var(--danger)">-${r.points_spent}</td>
+          <td>${r.is_pity?'<span class="tag tag-gold">保底</span>':'第'+r.draw_index+'抽'}</td>
+          <td>${fmtDate(r.created_at)}</td></tr>`;
+      }
+      html += '</tbody></table></div>';
+    }
+
+    showModal(`${uname} 完整记录`, html);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 任务管理 ==========
+async function loadTasks() {
+  try { const d = await API.get('/tasks/admin');
+    let html = `<div class="card"><div class="flex-between mb-2"><h3>任务列表</h3>
+      <button class="btn btn-primary btn-sm" onclick="showTaskForm()">+ 创建任务</button></div>
+      <div class="table-wrap"><table><thead><tr>
+        <th>标题</th><th>点数范围</th><th>周期</th><th>提交类型</th><th>状态</th><th>操作</th></tr></thead><tbody>`;
+    for (const t of d.tasks) {
+      html += `<tr>
+        <td><strong>${esc(t.title)}</strong><br><span class="text-sm text-muted">${esc(t.description)}</span></td>
+        <td>${t.points_min} - ${t.points_max}</td>
+        <td>${t.period_type} x${t.period_value}</td>
+        <td>${t.submission_type}</td>
+        <td><span class="tag tag-${t.is_active?'active':'rejected'}">${t.is_active?'启用':'禁用'}</span></td>
+        <td>
+          <button class="btn btn-outline btn-sm" onclick="showTaskForm('${t.id}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteTask('${t.id}')">删除</button>
+        </td></tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+async function showTaskForm(taskId) {
+  let task = null;
+  if (taskId) {
+    const d = await API.get('/tasks/admin');
+    task = d.tasks.find(t => t.id === taskId);
+  }
+
+  showModal(task ? '编辑任务' : '创建任务', `
+    <div class="form-group"><label>标题</label><input type="text" id="tf-title" value="${esc(task?.title||'')}"></div>
+    <div class="form-group"><label>描述</label><textarea id="tf-desc">${esc(task?.description||'')}</textarea></div>
+    <div class="grid-2">
+      <div class="form-group"><label>最低点数</label><input type="number" id="tf-min" value="${task?.points_min??0}"></div>
+      <div class="form-group"><label>最高点数</label><input type="number" id="tf-max" value="${task?.points_max??0}"></div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group"><label>周期类型</label><select id="tf-period"><option value="daily" ${task?.period_type==='daily'?'selected':''}>每日</option><option value="weekly" ${task?.period_type==='weekly'?'selected':''}>每周</option><option value="monthly" ${task?.period_type==='monthly'?'selected':''}>每月</option></select></div>
+      <div class="form-group"><label>每周期次数</label><input type="number" id="tf-pv" value="${task?.period_value??1}"></div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group"><label>提交类型</label><select id="tf-stype"><option value="both" ${task?.submission_type==='both'?'selected':''}>图片+文字</option><option value="image" ${task?.submission_type==='image'?'selected':''}>仅图片</option><option value="text" ${task?.submission_type==='text'?'selected':''}>仅文字</option></select></div>
+      <div class="form-group"><label>点数有效期(秒, 0=使用默认)</label><input type="number" id="tf-expiry" value="${task?.expiry_seconds??''}"></div>
+    </div>
+    <div class="form-group"><label><input type="checkbox" id="tf-active" ${task?.is_active!==0?'checked':''}> 启用</label></div>
+    <button class="btn btn-primary w-full" onclick="saveTask('${taskId||''}')">保存</button>
+  `);
+}
+
+async function saveTask(id) {
+  try {
+    const body = {
+      title: document.getElementById('tf-title').value,
+      description: document.getElementById('tf-desc').value,
+      points_min: parseInt(document.getElementById('tf-min').value),
+      points_max: parseInt(document.getElementById('tf-max').value),
+      period_type: document.getElementById('tf-period').value,
+      period_value: parseInt(document.getElementById('tf-pv').value),
+      submission_type: document.getElementById('tf-stype').value,
+      is_active: document.getElementById('tf-active').checked ? 1 : 0,
+      expiry_seconds: parseInt(document.getElementById('tf-expiry').value) || null,
+    };
+    if (id) body.id = id;
+    await API.post('/tasks/admin', body);
+    closeModal(); toast('任务保存成功', 'success'); loadTasks();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function deleteTask(id) { if (!confirm('确定删除此任务?')) return;
+  try { await API.del(`/tasks/admin/${id}`); toast('已删除', 'success'); loadTasks(); }
+  catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 任务审核 ==========
+let subPage = 1, subStatus = '';
+async function loadSubmissions(page = 1) { subPage = page;
+  try { const d = await API.get(`/tasks/admin/submissions?page=${page}&status=${subStatus}${userFilterParam()}`);
+    let html = `<div class="card">${userFilterHtml()}<div class="flex-between mb-2"><h3>任务提交审核 (共 ${d.total})</h3>
+      <select onchange="subStatus=this.value;loadSubmissions()" style="padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);">
+        <option value="">全部</option><option value="pending" ${subStatus==='pending'?'selected':''}>待审核</option><option value="approved" ${subStatus==='approved'?'selected':''}>已通过</option><option value="rejected" ${subStatus==='rejected'?'selected':''}>已拒绝</option>
+      </select></div>
+    <div class="table-wrap"><table><thead><tr><th>用户</th><th>任务</th><th>内容</th><th>图片</th><th>周期</th><th>状态</th><th>操作</th></tr></thead><tbody>`;
+    for (const s of d.submissions) {
+      html += `<tr>
+        <td>${esc(s.display_name||s.username)}</td><td class="td-task">${esc(s.task_title)}</td>
+        <td class="td-content">${esc(s.content_text)}</td>
+        <td>${s.image_url ? `<a href="#" onclick="viewImage('${s.image_url}');return false">查看</a>` : '-'}</td>
+        <td>${s.period_label}</td>
+        <td><span class="tag tag-${s.status}">${s.status==='pending'?'待审':s.status==='approved'?'通过':'拒绝'}</span></td>
+        <td>${s.status==='pending' ? `
+          <button class="btn btn-success btn-sm" onclick="reviewSubmission('${s.id}','approved','${s.task_id}')">通过</button>
+          <button class="btn btn-danger btn-sm" onclick="reviewSubmission('${s.id}','rejected','${s.task_id}')">拒绝</button>` :
+          `<span class="text-sm text-muted">${s.awarded_points?`+${s.awarded_points}点`:''}</span>`}</td></tr>`;
+    }
+    html += `</tbody></table></div>${pager(page, d.total, 20, 'loadSubmissions')}</div>`;
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+async function reviewSubmission(sid, status, taskId) {
+  let points = 0;
+  if (status === 'approved') {
+    const [td, rtd] = await Promise.all([
+      API.get('/tasks/admin'),
+      API.get('/random-tasks/admin/tasks').catch(()=>({tasks:[]})),
+    ]);
+    const task = td.tasks.find(t => t.id === taskId) || (rtd.tasks||[]).find(t => t.id === taskId);
+    const p = prompt(`给予点数 (任务范围: ${task?.points_min??0}-${task?.points_max??0}):`, task?.points_min??0);
+    if (!p) return;
+    points = parseInt(p);
+    if (isNaN(points) || points < (task?.points_min??0) || points > (task?.points_max??0)) {
+      toast('点数超出任务范围', 'error'); return;
+    }
+  }
+  try {
+    await API.post(`/tasks/admin/review/${sid}`, { status, awarded_points: points, remark: '' });
+    toast(status === 'approved' ? '已通过' : '已拒绝', 'success'); loadSubmissions(subPage);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 商品管理 ==========
+async function loadShopItems() {
+  try { const d = await API.get('/shop/admin/items');
+    let html = `<div class="card"><div class="flex-between mb-2"><h3>商品列表</h3>
+      <button class="btn btn-primary btn-sm" onclick="showItemForm()">+ 添加商品</button></div>
+      <div class="table-wrap"><table><thead><tr><th>名称</th><th>所需点数</th><th>库存</th><th>状态</th><th>操作</th></tr></thead><tbody>`;
+    for (const i of d.items) {
+      html += `<tr><td><strong>${esc(i.name)}</strong><br><span class="text-sm text-muted">${esc(i.description)}</span></td>
+        <td>${i.points_required}</td><td>${i.stock===-1?'无限':i.stock}</td>
+        <td><span class="tag tag-${i.is_active?'active':'rejected'}">${i.is_active?'上架':'下架'}</span></td>
+        <td>
+          <button class="btn btn-outline btn-sm" onclick="showItemForm('${i.id}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteItem('${i.id}')">删除</button>
+        </td></tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+function showItemForm(itemId) {
+  API.get('/shop/admin/items').then(d => {
+    const item = itemId ? d.items.find(i => i.id === itemId) : null;
+    showModal(item ? '编辑商品' : '添加商品', `
+      <div class="form-group"><label>名称</label><input type="text" id="if-name" value="${esc(item?.name||'')}"></div>
+      <div class="form-group"><label>描述</label><textarea id="if-desc">${esc(item?.description||'')}</textarea></div>
+      <div class="grid-2">
+        <div class="form-group"><label>所需点数</label><input type="number" id="if-points" value="${item?.points_required??0}"></div>
+        <div class="form-group"><label>库存 (-1=无限)</label><input type="number" id="if-stock" value="${item?.stock??-1}"></div>
+      </div>
+      <div class="form-group"><label>图片链接</label><input type="text" id="if-image" value="${esc(item?.image_url||'')}"></div>
+      <div class="form-group"><label><input type="checkbox" id="if-active" ${item?.is_active!==0?'checked':''}> 上架</label></div>
+      <button class="btn btn-primary w-full" onclick="saveItem('${itemId||''}')">保存</button>
+    `);
+  });
+}
+
+async function saveItem(id) {
+  try {
+    const body = {
+      name: document.getElementById('if-name').value,
+      description: document.getElementById('if-desc').value,
+      points_required: parseInt(document.getElementById('if-points').value),
+      stock: parseInt(document.getElementById('if-stock').value),
+      image_url: document.getElementById('if-image').value,
+      is_active: document.getElementById('if-active').checked ? 1 : 0,
+    };
+    if (id) body.id = id;
+    await API.post('/shop/admin/items', body);
+    closeModal(); toast('商品保存成功', 'success'); loadShopItems();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function deleteItem(id) { if (!confirm('删除?')) return;
+  try { await API.del(`/shop/admin/items/${id}`); toast('已删除'); loadShopItems(); }
+  catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 兑换审核 ==========
+let ordPage = 1, ordStatus = '';
+async function loadOrders(page = 1) { ordPage = page;
+  try {
+    const f = userFilterParam();
+    const [d, bp] = await Promise.all([
+      API.get(`/shop/admin/orders?page=${page}&status=${ordStatus}${f}`),
+      API.get(`/lottery/admin/backpack-redemptions?page=${page}&status=${ordStatus}${f}`).catch(()=>({redemptions:[],total:0})),
+    ]);
+
+    let html = `<div class="card">${userFilterHtml()}<h3>📦 兑换审核</h3>
+    <div class="flex gap-1 mb-2">
+      <button class="btn btn-sm ${ordStatus===''?'btn-primary':'btn-outline'}" onclick="ordStatus='';loadOrders()">全部</button>
+      <button class="btn btn-sm ${ordStatus==='pending'?'btn-primary':'btn-outline'}" onclick="ordStatus='pending';loadOrders()">待审核</button>
+      <button class="btn btn-sm ${ordStatus==='approved'?'btn-primary':'btn-outline'}" onclick="ordStatus='approved';loadOrders()">已通过</button>
+      <button class="btn btn-sm ${ordStatus==='rejected'?'btn-primary':'btn-outline'}" onclick="ordStatus='rejected';loadOrders()">已拒绝</button>
+    </div>`;
+
+    // 商品兑换
+    if (d.orders?.length) {
+      html += '<h4 class="mb-1">🛒 商品兑换</h4><div class="table-wrap"><table><thead><tr><th>用户</th><th>商品</th><th>点数</th><th>内容</th><th>兑换时间</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+      for (const o of d.orders) {
+        html += `<tr><td>${esc(o.display_name||o.username)}</td><td>${esc(o.item_name)}</td><td>${o.points_spent}</td>
+          <td>${esc(o.content_text)||'-'} ${o.image_url?`<a href="#" onclick="viewImage('${o.image_url}');return false">图片</a>`:''}</td>
+          <td>${fmtDate(o.created_at)}</td>
+          <td><span class="tag tag-${o.status}">${o.status==='pending'?'待审':o.status==='approved'?'通过':'拒绝'}</span></td>
+          <td>${o.status==='pending' ? `
+            <button class="btn btn-success btn-sm" onclick="reviewOrder('${o.id}','approved')">通过</button>
+            <button class="btn btn-danger btn-sm" onclick="reviewOrder('${o.id}','rejected')">拒绝</button>` : '-'}</td></tr>`;
+      }
+      html += '</tbody></table></div>';
+    }
+
+    // 背包兑换
+    if ((bp.redemptions||[]).length) {
+      html += '<h4 class="mb-1 mt-2">🎒 背包物品兑换</h4><div class="table-wrap"><table><thead><tr><th>用户</th><th>物品</th><th>稀有度</th><th>内容</th><th>兑换时间</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+      for (const r of bp.redemptions||[]) {
+        html += `<tr><td>${esc(r.display_name||r.username)}</td><td>${r.item_icon||''} ${esc(r.item_name)}</td>
+          <td><span class="tag tag-${r.rarity==='legendary'?'gold':r.rarity==='epic'?'approved':'info'}">${r.rarity}</span></td>
+          <td>${esc(r.content_text)||'-'}</td>
+          <td>${fmtDate(r.created_at)}</td>
+          <td><span class="tag tag-${r.status}">${r.status==='pending'?'待审':r.status==='approved'?'通过':'拒绝'}</span></td>
+          <td>${r.status==='pending'?`
+            <button class="btn btn-success btn-sm" onclick="reviewBpRedeem('${r.id}','approved')">通过</button>
+            <button class="btn btn-danger btn-sm" onclick="reviewBpRedeem('${r.id}','rejected')">拒绝</button>`:'-'}</td></tr>`;
+      }
+      html += '</tbody></table></div>';
+    }
+
+    if (!d.orders?.length && !(bp.redemptions||[]).length) html += '<p class="text-center text-muted">暂无记录</p>';
+
+    // 用户背包管理
+    html += `<div class="card mt-2" style="background:var(--surface2);"><h4>🔍 查询用户背包</h4>
+      <div class="flex gap-1"><input type="text" id="bp-user-search" placeholder="输入用户名搜索..." style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);" onkeyup="if(event.key==='Enter')searchUserBackpack()">
+      <button class="btn btn-primary btn-sm" onclick="searchUserBackpack()">查询</button></div>
+      <div id="bp-search-result" class="mt-1"></div></div></div>`;
+
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+async function searchUserBackpack() {
+  const q = document.getElementById('bp-user-search').value.trim();
+  if (!q) return;
+  const users = await API.get(`/auth/users?search=${encodeURIComponent(q)}`).catch(() => ({ users: [] }));
+  if (!users.users?.length) { document.getElementById('bp-search-result').innerHTML='<p class="text-muted">未找到用户</p>'; return; }
+  const u = users.users[0];
+  const bp = await API.get(`/lottery/admin/backpack/${u.id}`).catch(()=>({backpack:[]}));
+  let h = `<strong>${esc(u.display_name||u.username)} 的背包</strong><div class="table-wrap"><table><thead><tr><th>物品</th><th>稀有度</th><th>数量</th><th>状态</th><th>操作</th></tr></thead><tbody>`;
+  for (const i of bp.backpack||[]) {
+    h += `<tr><td>${i.item_icon||''} ${esc(i.item_name)}</td><td><span class="tag tag-${i.rarity==='legendary'?'gold':'info'}">${i.rarity}</span></td>
+      <td>${i.quantity}</td><td>${i.is_redeemed?'<span class="tag tag-rejected">已兑换</span>':'<span class="tag tag-active">可兑换</span>'}</td>
+      <td>${!i.is_redeemed ? `<button class="btn btn-danger btn-sm" onclick="adminRemoveBackpackItem('${i.id}','${u.id}')">移除</button>` : '-'}</td></tr>`;
+  }
+  h += '</tbody></table></div>';
+  document.getElementById('bp-search-result').innerHTML = h;
+}
+
+async function adminRemoveBackpackItem(bid, uid) {
+  if (!confirm('确定移除此背包物品?')) return;
+  await API.del(`/lottery/admin/backpack/item/${bid}`).catch(() => {});
+  toast('已移除'); searchUserBackpack();
+}
+
+async function reviewOrder(oid, status) {
+  try {
+    await API.post(`/shop/admin/orders/${oid}/review`, { status, remark: '' });
+    toast(status === 'approved' ? '已通过' : '已拒绝(已退款)', 'success'); loadOrders(ordPage);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 贷款管理 ==========
+async function loadLoans() {
+  try { const d = await API.get('/loans/admin/all');
+    let html = `<div class="card"><h3>贷款列表</h3><div class="table-wrap"><table><thead><tr>
+      <th>用户</th><th>本金</th><th>剩余</th><th>周利率</th><th>借款时间</th><th>状态</th><th>操作</th></tr></thead><tbody>`;
+    for (const l of d.loans) {
+      html += `<tr><td>${esc(l.display_name||l.username)}</td><td>${l.principal}</td><td>${l.remaining}</td>
+        <td>${(l.weekly_interest_rate*100).toFixed(1)}%</td><td>${fmtDate(l.borrowed_at)}</td>
+        <td><span class="tag tag-${l.status}">${l.status==='active'?'活跃':l.status==='repaid'?'已还清':'违约'}</span></td>
+        <td>${l.status==='active' ? `
+          <button class="btn btn-outline btn-sm" onclick="adjustLoan('${l.id}','mark_repaid')">强制结清</button>
+          <button class="btn btn-outline btn-sm" onclick="adjustLoan('${l.id}','mark_defaulted')">标记违约</button>` : '-'}</td></tr>`;
+    }
+    html += `</tbody></table></div></div>`;
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+async function adjustLoan(lid, action) {
+  try { await API.post('/loans/admin/adjust', { loan_id: lid, action }); toast('操作成功'); loadLoans(); }
+  catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 系统设置 ==========
+async function loadSettings() {
+  try { const d = await API.get('/admin/settings');
+    let html = '<div class="card"><h3>系统配置</h3>';
+    const labels = {
+      base_points_amount: '基础点数发放量', base_points_period_minutes: '基础点数周期(分钟)',
+      base_points_expiry_seconds: '基础点数有效期(秒)', task_point_expiry_seconds: '任务点数默认有效期(秒)',
+      loan_weekly_interest_rate: '贷款周利率', loan_penalty_multiplier: '逾期罚款倍数',
+      loan_penalty_days: '逾期判定天数', shop_purchase_expiry_seconds: '兑换退款点数有效期(秒)',
+      lottery_points_expiry_seconds: '抽卡获得点数有效期(秒)',
+      allow_negative_balance: '允许负数余额', serverchan_sendkey: 'Server酱 SendKey',
+      login_captcha_mode: '登录验证模式',
+    };
+    for (const s of d.settings) {
+      const label = labels[s.key] || s.key;
+      if (s.key === 'login_captcha_mode') {
+        const noneSel = s.value === 'none' ? 'selected' : '';
+        const tsSel = s.value === 'turnstile' ? 'selected' : '';
+        const capSel = s.value === 'captcha' ? 'selected' : '';
+        html += `<div class="form-group"><label>${label} <span class="text-muted">(${s.key})</span></label>
+          <select id="set-${s.key}" style="padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);width:100%;">
+            <option value="none" ${noneSel}>不启用验证码</option>
+            <option value="turnstile" ${tsSel}>Turnstile (Cloudflare)</option>
+            <option value="captcha" ${capSel}>图形验证码</option>
+          </select></div>`;
+      } else {
+        html += `<div class="form-group"><label>${label} <span class="text-muted">(${s.key})</span></label>
+          <div class="flex gap-1">
+            <input type="text" id="set-${s.key}" value="${esc(s.value)}" style="flex:1">
+          </div></div>`;
+      }
+    }
+    html += `<div class="flex gap-1 mt-2">
+      <button class="btn btn-primary" onclick="saveAllSettings()">💾 一键保存全部设置</button>
+      <button class="btn btn-outline" onclick="resetBasePoints()">🔄 重置基础点数发放时间并立即发放</button>
+    </div>
+    <div class="mt-2"><p class="text-sm text-muted mb-1">🔧 工具:</p>
+      <button class="btn btn-outline btn-sm" onclick="reconcileAllBalances()">🔁 重算全部用户可用点数</button>
+      <button class="btn btn-danger btn-sm" onclick="clearAllLedger()" style="margin-left:8px;">🗑️ 清除全部点数流水</button>
+    </div></div>`;
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+async function saveAllSettings() {
+  try {
+    const inputs = document.querySelectorAll('[id^="set-"]');
+    const settings = [];
+    for (const input of inputs) {
+      settings.push({ key: input.id.replace('set-', ''), value: input.value });
+    }
+    await API.put('/admin/settings/batch', { settings });
+    toast('全部设置已保存', 'success');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function resetBasePoints() {
+  if (!confirm('将立即刷新基础点数发放时间并向所有用户发放基础点数，确定?')) return;
+  try {
+    const result = await API.post('/admin/points/reset-base-distribution', {});
+    toast('基础点数已重新发放!', 'success');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function reconcileAllBalances() {
+  if (!confirm('将根据流水表全量重算所有用户的可用点数，确定?')) return;
+  try {
+    const users = await API.get('/auth/users');
+    let count = 0;
+    for (const u of users.users || []) {
+      try { await API.post(`/admin/points/reconcile/${u.id}`, {}); count++; } catch {}
+    }
+    toast(`已重算 ${count} 位用户的可用点数`, 'success');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function clearAllLedger() {
+  if (!confirm('⚠️ 确定清空所有用户的点数流水吗？\n\n此操作不可撤销！清空后所有用户的余额将归零。')) return;
+  if (!confirm('再次确认：清空流水后余额归零，确定继续？')) return;
+  try {
+    await API.post('/admin/points/clear-ledger', {});
+    toast('全部点数流水已清除，所有用户余额归零', 'success');
+    loadSettings();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 操作日志 ==========
+async function loadLogs(page = 1) {
+  try { const d = await API.get(`/admin/logs?page=${page}`);
+    let html = `<div class="card"><h3>操作日志</h3><div class="table-wrap"><table><thead><tr>
+      <th>管理员</th><th>操作</th><th>详情</th><th>时间</th></tr></thead><tbody>`;
+    for (const l of d.logs) {
+      html += `<tr><td>${l.admin_username}</td><td><span class="tag">${l.action}</span></td>
+        <td>${esc(l.detail)}</td><td>${fmtDate(l.created_at)}</td></tr>`;
+    }
+    html += `</tbody></table></div>${pager(page, d.total, 30, 'loadLogs')}</div>`;
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+// ========== 工具函数 ==========
+function setContent(html) { document.getElementById('tab-content').innerHTML = html; }
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtDate(d) { if (!d) return '-'; return new Date(d).toLocaleString('zh-CN'); }
+
+// ========== 图片查看器 (支持双指缩放) ==========
+let imgViewerScale = 1, imgViewerStartDist = 0, imgViewerStartScale = 1, imgViewerPanX = 0, imgViewerPanY = 0, imgViewerIsPanning = false, imgViewerPanStartX = 0, imgViewerPanStartY = 0;
+
+function viewImage(url) {
+  const v = document.getElementById('img-viewer');
+  imgViewerScale = 1; imgViewerPanX = 0; imgViewerPanY = 0;
+  v.innerHTML = `
+    <div class="img-viewer-overlay" id="img-viewer-bg" onclick="if(event.target===this)closeImageViewer()">
+      <button class="img-viewer-close" onclick="closeImageViewer()">✕</button>
+      <div class="img-viewer-wrapper" id="img-viewer-wrap">
+        <img src="${url}" id="img-viewer-img" draggable="false">
+      </div>
+      <div class="img-viewer-toolbar" id="img-viewer-bar">
+        <button onclick="zoomImageViewer(0.3)">🔍 放大</button>
+        <button onclick="zoomImageViewer(-0.3)">🔎 缩小</button>
+        <button onclick="zoomImageViewer(0, true)">↺ 重置</button>
+        <button onclick="downloadImage('${url}')">💾 下载</button>
+      </div>
+    </div>`;
+  v.classList.remove('hidden');
+
+  const wrap = document.getElementById('img-viewer-wrap');
+  wrap.addEventListener('touchstart', onImgTouchStart, { passive: false });
+  wrap.addEventListener('touchmove', onImgTouchMove, { passive: false });
+  wrap.addEventListener('touchend', onImgTouchEnd);
+}
+
+function applyImgTransform() {
+  const img = document.getElementById('img-viewer-img');
+  if (img) img.style.transform = `translate(${imgViewerPanX}px,${imgViewerPanY}px) scale(${imgViewerScale})`;
+}
+
+function zoomImageViewer(delta, reset) {
+  if (reset) { imgViewerScale = 1; imgViewerPanX = 0; imgViewerPanY = 0; }
+  else imgViewerScale = Math.max(0.2, Math.min(5, imgViewerScale + delta));
+  applyImgTransform();
+}
+
+function getTouchDist(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function onImgTouchStart(e) {
+  if (e.touches.length === 2) {
+    imgViewerIsPanning = false;
+    imgViewerStartDist = getTouchDist(e.touches);
+    imgViewerStartScale = imgViewerScale;
+    e.preventDefault();
+  } else if (e.touches.length === 1) {
+    imgViewerIsPanning = true;
+    imgViewerPanStartX = e.touches[0].clientX - imgViewerPanX;
+    imgViewerPanStartY = e.touches[0].clientY - imgViewerPanY;
+  }
+}
+
+function onImgTouchMove(e) {
+  if (e.touches.length === 2) {
+    imgViewerIsPanning = false;
+    const dist = getTouchDist(e.touches);
+    if (imgViewerStartDist > 0) {
+      imgViewerScale = Math.max(0.2, Math.min(5, imgViewerStartScale * (dist / imgViewerStartDist)));
+      applyImgTransform();
+    }
+    e.preventDefault();
+  } else if (e.touches.length === 1 && imgViewerIsPanning) {
+    imgViewerPanX = e.touches[0].clientX - imgViewerPanStartX;
+    imgViewerPanY = e.touches[0].clientY - imgViewerPanStartY;
+    applyImgTransform();
+  }
+}
+
+function onImgTouchEnd(e) {
+  if (e.touches.length === 0) {
+    imgViewerIsPanning = false;
+    imgViewerStartDist = 0;
+  }
+}
+
+function closeImageViewer() {
+  document.getElementById('img-viewer').classList.add('hidden');
+  document.getElementById('img-viewer').innerHTML = '';
+  imgViewerScale = 1; imgViewerPanX = 0; imgViewerPanY = 0;
+}
+
+async function downloadImage(url) {
+  try {
+    const r = await fetch(url);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = url.split('/').pop() || 'image';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e) { window.open(url, '_blank'); }
+}
+
+function pager(page, total, ps, fn) {
+  const tp = Math.ceil(total / ps);
+  if (tp <= 1) return '';
+  let h = '<div class="pagination">';
+  for (let i = 1; i <= tp; i++) {
+    h += `<button class="btn btn-outline btn-sm ${i===page?'btn-primary':''}" onclick="${fn}(${i})">${i}</button>`;
+  }
+  return h + '</div>';
+}
+
+function showModal(title, body) {
+  document.getElementById('modal-container').innerHTML = `
+    <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+      <div class="modal"><div class="flex-between mb-2"><h3>${title}</h3><button class="btn btn-outline btn-sm" onclick="closeModal()">✕</button></div>${body}</div>
+    </div>`;
+}
+function closeModal() { document.getElementById('modal-container').innerHTML = ''; }
+
+// ========== 抽奖管理 ==========
+let lotteryItems = [];
+async function loadLottery() {
+  try {
+    const [d, s] = await Promise.all([
+      API.get('/lottery/admin/items'), API.get('/lottery/admin/settings'),
+    ]);
+    lotteryItems = d.items || [];
+
+    let html = `<div class="card"><div class="flex-between mb-2"><h3>奖品管理 (共${lotteryItems.length}个)</h3>
+      <button class="btn btn-primary btn-sm" onclick="showLotteryItemForm()">+ 添加奖品</button></div>`;
+
+    // 抽奖设置
+    html += `<div class="card" style="background:var(--primary-light);margin-bottom:16px;"><h3>⚙️ 抽奖设置</h3>
+      <div class="grid-2">
+        <div class="form-group"><label>单抽消耗点数</label><input type="number" id="ls-cost" value="${s.cost}" onchange="updateLotterySetting('cost',this.value)"></div>
+        <div class="form-group"><label>保底抽数</label><input type="number" id="ls-pity" value="${s.pity_count}" onchange="updateLotterySetting('pity_count',this.value)"></div>
+      </div>
+      <div class="form-group"><label>保底奖品 (必出物品)</label><select id="ls-pity-item" onchange="updateLotterySetting('pity_item_id',this.value)">
+        <option value="">不使用保底</option>
+        ${lotteryItems.map(i => `<option value="${i.id}" ${i.id===s.pity_item_id?'selected':''}>${i.name} (${i.rarity})</option>`).join('')}
+      </select></div></div>`;
+
+    // 奖品列表
+    html += '<div class="table-wrap"><table><thead><tr><th>图标</th><th>名称</th><th>类型</th><th>稀有度</th><th>概率</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    for (const i of lotteryItems) {
+      html += `<tr><td style="font-size:1.5rem">${i.icon||'🎁'}</td><td><strong>${esc(i.name)}</strong><br><span class="text-sm text-muted">${esc(i.description)}</span></td>
+        <td>${(i.reward_type==='points')?`<span class="tag tag-gold">💰+${i.points_amount||0}点</span>`:'<span class="tag tag-info">🎒背包</span>'}</td>
+        <td><span class="tag tag-${i.rarity==='legendary'?'gold':i.rarity==='epic'?'approved':i.rarity==='rare'?'pending':'info'}">${i.rarity}</span></td>
+        <td>${(i.probability*100).toFixed(2)}%</td>
+        <td><span class="tag tag-${i.is_active?'active':'rejected'}">${i.is_active?'启用':'禁用'}</span></td>
+        <td>
+          <button class="btn btn-outline btn-sm" onclick="showLotteryItemForm('${i.id}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteLotteryItem('${i.id}')">删除</button>
+        </td></tr>`;
+    }
+    html += '</tbody></table></div>';
+
+    // 统计
+    try {
+      const st = await API.get('/lottery/admin/stats');
+      html += `<div class="card mt-2"><h3>📊 抽卡统计</h3>
+        <div class="stats-grid">
+          <div class="stat-card"><div class="num">${st.total_draws}</div><div class="label">总抽卡次数</div></div>
+          <div class="stat-card"><div class="num">${st.total_points_spent}</div><div class="label">消耗总点数</div></div>
+          <div class="stat-card"><div class="num">${st.pity_triggered}</div><div class="label">保底触发</div></div>
+          <div class="stat-card"><div class="num">${st.backpack_items}</div><div class="label">背包物品</div></div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>物品</th><th>稀有度</th><th>被抽次数</th></tr></thead><tbody>
+        ${(st.item_stats||[]).map(s => `<tr><td>${esc(s.name)}</td><td>${s.rarity}</td><td>${s.draw_count}</td></tr>`).join('')}
+        </tbody></table></div></div>`;
+    } catch {}
+
+    html += '</div>';
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+function showLotteryItemForm(itemId) {
+  const item = itemId ? lotteryItems.find(i => i.id === itemId) : null;
+  const rarities = ['common', 'rare', 'epic', 'legendary'];
+  const isPoints = item?.reward_type === 'points';
+  showModal(item ? '编辑奖品' : '添加奖品', `
+    <div class="grid-2">
+      <div class="form-group"><label>名称</label><input type="text" id="li-name" value="${esc(item?.name||'')}"></div>
+      <div class="form-group"><label>Emoji图标</label><input type="text" id="li-icon" value="${esc(item?.icon||'🎁')}"></div>
+    </div>
+    <div class="form-group"><label>描述</label><textarea id="li-desc">${esc(item?.description||'')}</textarea></div>
+    <div class="grid-2">
+      <div class="form-group"><label>稀有度</label><select id="li-rarity">${rarities.map(r => `<option value="${r}" ${item?.rarity===r?'selected':''}>${r}</option>`).join('')}</select></div>
+      <div class="form-group"><label>奖励类型</label><select id="li-rtype" onchange="document.getElementById('li-pgroup').classList.toggle('hidden',this.value!=='points')">
+        <option value="item" ${!isPoints?'selected':''}>背包物品</option>
+        <option value="points" ${isPoints?'selected':''}>点数奖励</option>
+      </select></div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group"><label>概率 (0~1, 如 0.05=5%, 0.0005=0.05%)</label><input type="number" id="li-prob" step="any" min="0" max="1" value="${item?.probability??0.05}"></div>
+      <div class="form-group"><label>排序</label><input type="number" id="li-sort" value="${item?.sort_order??0}"></div>
+    </div>
+    <div id="li-pgroup" class="${isPoints?'':'hidden'}">
+      <div class="form-group"><label>直接发放点数</label><input type="number" id="li-pts" value="${item?.points_amount||0}"></div>
+    </div>
+    <div class="form-group"><label>图片链接</label><input type="text" id="li-image" value="${esc(item?.image_url||'')}"></div>
+    <div class="form-group"><label><input type="checkbox" id="li-active" ${item?.is_active!==0?'checked':''}> 启用</label></div>
+    <button class="btn btn-primary w-full" onclick="saveLotteryItem('${itemId||''}')">保存</button>
+  `);
+}
+
+async function saveLotteryItem(id) {
+  try {
+    const rewardType = document.getElementById('li-rtype').value;
+    const body = {
+      name: document.getElementById('li-name').value,
+      description: document.getElementById('li-desc').value,
+      icon: document.getElementById('li-icon').value,
+      rarity: document.getElementById('li-rarity').value,
+      probability: parseFloat(document.getElementById('li-prob').value),
+      sort_order: parseInt(document.getElementById('li-sort').value),
+      reward_type: rewardType,
+      points_amount: rewardType === 'points' ? parseInt(document.getElementById('li-pts').value) || 0 : 0,
+      image_url: document.getElementById('li-image').value,
+      is_active: document.getElementById('li-active').checked ? 1 : 0,
+    };
+    if (id) body.id = id;
+    await API.post('/lottery/admin/items', body);
+    closeModal(); toast('奖品保存成功', 'success'); loadLottery();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function deleteLotteryItem(id) { if (!confirm('删除?')) return;
+  try { await API.del(`/lottery/admin/items/${id}`); toast('已删除'); loadLottery(); }
+  catch(e) { toast(e.message, 'error'); }
+}
+
+async function updateLotterySetting(key, val) {
+  const body = {};
+  if (key === 'cost') body.cost = parseInt(val);
+  else if (key === 'pity_count') body.pity_count = parseInt(val);
+  else if (key === 'pity_item_id') body.pity_item_id = val;
+  try { await API.put('/lottery/admin/settings', body); toast('设置已更新', 'success'); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
+// ========== 背包兑换审核 ==========
+async function loadBpRedemptions(page = 1) {
+  try { const d = await API.get(`/lottery/admin/backpack-redemptions?page=${page}${userFilterParam()}`);
+    let html = `<div class="card">${userFilterHtml()}<h3>背包兑换审核 (共${d.total})</h3>
+    <div class="table-wrap"><table><thead><tr><th>用户</th><th>物品</th><th>稀有度</th><th>内容</th><th>图片</th><th>状态</th><th>操作</th></tr></thead><tbody>`;
+    for (const r of d.redemptions||[]) {
+      html += `<tr><td>${esc(r.display_name||r.username)}</td><td>${r.item_icon||''} ${esc(r.item_name)}</td>
+        <td><span class="tag tag-${r.rarity==='legendary'?'gold':r.rarity==='epic'?'approved':'info'}">${r.rarity}</span></td>
+        <td>${esc(r.content_text)||'-'}</td>
+        <td>${r.image_url ? `<a href="#" onclick="viewImage('${r.image_url}');return false">查看</a>` : '-'}</td>
+        <td><span class="tag tag-${r.status}">${r.status==='pending'?'待审':r.status==='approved'?'通过':'拒绝'}</span></td>
+        <td>${r.status==='pending'?`
+          <button class="btn btn-success btn-sm" onclick="reviewBpRedeem('${r.id}','approved')">通过</button>
+          <button class="btn btn-danger btn-sm" onclick="reviewBpRedeem('${r.id}','rejected')">拒绝</button>`:'-'}</td></tr>`;
+    }
+    html += `</tbody></table></div>${pager(page, d.total, 20, 'loadBpRedemptions')}</div>`;
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+async function reviewBpRedeem(id, status) {
+  try { await API.post(`/lottery/admin/backpack-redemptions/${id}/review`, { status, remark: '' });
+    toast(status==='approved'?'已通过':'已拒绝', 'success'); loadBpRedemptions();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ========== 随机任务组管理 ==========
+async function loadTaskGroups() {
+  try {
+    const [d, rt] = await Promise.all([
+      API.get('/random-tasks/admin/groups'),
+      API.get('/random-tasks/admin/tasks'),
+    ]);
+    const groups = d.groups || [];
+    let html = `<div class="card"><div class="flex-between mb-2"><h3>随机任务组 (${groups.length}个) & 任务库</h3>
+      <div class="flex gap-1">
+        <button class="btn btn-primary btn-sm" onclick="showRandomTaskForm()">+ 添加随机任务</button>
+        <button class="btn btn-outline btn-sm" onclick="showTaskGroupForm()">+ 创建任务组</button>
+      </div></div>
+      <p class="text-sm text-muted mb-2">独立任务库 · 从下方任务中选择一组组成惊喜任务组</p>`;
+
+    // 独立任务列表
+    html += `<div class="card" style="background:var(--surface2);margin-bottom:12px;"><h4>📋 随机任务库 (${(rt.tasks||[]).length}个)</h4>
+    <div class="table-wrap"><table><thead><tr><th>标题</th><th>点数</th><th>提交</th><th>状态</th><th>操作</th></tr></thead><tbody>`;
+    for (const t of (rt.tasks||[])) {
+      html += `<tr><td><strong>${esc(t.title)}</strong><br><span class="text-sm text-muted">${esc(t.description)}</span></td>
+        <td>${t.points_min}-${t.points_max}</td><td>${t.submission_type}</td>
+        <td><span class="tag tag-${t.is_active?'active':'rejected'}">${t.is_active?'启用':'禁用'}</span></td>
+        <td><button class="btn btn-outline btn-sm" onclick="showRandomTaskForm('${t.id}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteRandomTask('${t.id}')">删除</button></td></tr>`;
+    }
+    html += '</tbody></table></div></div>';
+
+    // 任务组列表
+    for (const g of groups) {
+      html += `<div class="card" style="background:var(--surface2);">
+        <div class="flex-between"><div><strong>${esc(g.name)}</strong> <span class="tag tag-info">${g.period_type==='daily'?'每日':g.period_type==='weekly'?'每周':'每月'}</span> ${g.is_active?'<span class=\"tag tag-active\">启用</span>':'<span class=\"tag tag-rejected\">禁用</span>'}</div>
+        <div class="flex gap-1">
+          <button class="btn btn-outline btn-sm" onclick="showTaskGroupForm('${g.id}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteTaskGroup('${g.id}')">删除</button>
+        </div></div>
+        <div class="mt-1 text-sm text-muted">候选任务: ${(g.items||[]).map(i => `${esc(i.title)}(${i.points_min}-${i.points_max}点)`).join(', ') || '无'}</div>
+      </div>`;
+    }
+    html += '</div>';
+    setContent(html);
+  } catch(e) { setContent(`<div class="card"><p style="color:var(--danger)">${e.message}</p></div>`); }
+}
+
+// 独立随机任务 Form
+async function showRandomTaskForm(rid) {
+  let task = null;
+  if (rid) {
+    const d = await API.get('/random-tasks/admin/tasks');
+    task = (d.tasks||[]).find(t => t.id === rid);
+  }
+  showModal(task ? '编辑随机任务' : '添加随机任务', `
+    <div class="form-group"><label>标题</label><input type="text" id="rtf-title" value="${esc(task?.title||'')}"></div>
+    <div class="form-group"><label>描述</label><textarea id="rtf-desc">${esc(task?.description||'')}</textarea></div>
+    <div class="grid-2">
+      <div class="form-group"><label>最低点数</label><input type="number" id="rtf-min" value="${task?.points_min??0}"></div>
+      <div class="form-group"><label>最高点数</label><input type="number" id="rtf-max" value="${task?.points_max??0}"></div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group"><label>提交类型</label><select id="rtf-stype"><option value="both" ${task?.submission_type==='both'?'selected':''}>图片+文字</option><option value="image" ${task?.submission_type==='image'?'selected':''}>仅图片</option><option value="text" ${task?.submission_type==='text'?'selected':''}>仅文字</option></select></div>
+      <div class="form-group"><label>点数有效期(秒, 0=默认)</label><input type="number" id="rtf-expiry" value="${task?.expiry_seconds??''}"></div>
+    </div>
+    <div class="form-group"><label><input type="checkbox" id="rtf-active" ${task?.is_active!==0?'checked':''}> 启用</label></div>
+    <button class="btn btn-primary w-full" onclick="saveRandomTask('${rid||''}')">保存</button>
+  `);
+}
+
+async function saveRandomTask(id) {
+  try {
+    const body = {
+      title: document.getElementById('rtf-title').value,
+      description: document.getElementById('rtf-desc').value,
+      points_min: parseInt(document.getElementById('rtf-min').value),
+      points_max: parseInt(document.getElementById('rtf-max').value),
+      submission_type: document.getElementById('rtf-stype').value,
+      is_active: document.getElementById('rtf-active').checked ? 1 : 0,
+      expiry_seconds: parseInt(document.getElementById('rtf-expiry').value) || null,
+    };
+    if (id) body.id = id;
+    await API.post('/random-tasks/admin/tasks', body);
+    closeModal(); toast('随机任务保存成功', 'success'); loadTaskGroups();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function deleteRandomTask(id) { if (!confirm('删除?')) return;
+  try { await API.del(`/random-tasks/admin/tasks/${id}`); toast('已删除'); loadTaskGroups(); }
+  catch(e) { toast(e.message, 'error'); }
+}
+
+async function showTaskGroupForm(gid) {
+  let group = null;
+  if (gid) {
+    const d = await API.get('/random-tasks/admin/groups');
+    group = (d.groups||[]).find(g => g.id === gid);
+  }
+  const tasksData = await API.get('/random-tasks/admin/tasks');
+  const allTasks = tasksData.tasks || [];
+  showModal(group ? '编辑任务组' : '创建任务组', `
+    <div class="form-group"><label>组名</label><input type="text" id="tg-name" value="${esc(group?.name||'')}"></div>
+    <div class="form-group"><label>周期</label><select id="tg-period">
+      <option value="daily" ${group?.period_type==='daily'?'selected':''}>每日</option>
+      <option value="weekly" ${group?.period_type==='weekly'?'selected':''}>每周</option>
+      <option value="monthly" ${group?.period_type==='monthly'?'selected':''}>每月</option>
+    </select></div>
+    <div class="form-group"><label>候选任务 (多选)</label>
+      <div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;">
+        ${allTasks.filter(t => t.is_active).map(t => `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;">
+          <input type="checkbox" id="tg-tid-${t.id}" value="${t.id}" ${(group?.items||[]).some(i=>i.task_id===t.id)?'checked':''}>
+          <span>${esc(t.title)} (${t.points_min}-${t.points_max}点)</span></label>`).join('')}
+        ${allTasks.filter(t=>t.is_active).length===0?'<span class="text-muted">请先创建任务!</span>':''}
+      </div></div>
+    <div class="form-group"><label><input type="checkbox" id="tg-active" ${group?.is_active!==0?'checked':''}> 启用</label></div>
+    <button class="btn btn-primary w-full" onclick="saveTaskGroup('${gid||''}')">保存</button>
+  `);
+}
+
+async function saveTaskGroup(id) {
+  try {
+    const taskIds = [];
+    document.querySelectorAll('[id^="tg-tid-"]').forEach(cb => { if (cb.checked) taskIds.push(cb.value); });
+    if (taskIds.length === 0) { toast('请至少选一个候选任务', 'error'); return; }
+    const body = {
+      name: document.getElementById('tg-name').value,
+      period_type: document.getElementById('tg-period').value,
+      is_active: document.getElementById('tg-active').checked ? 1 : 0,
+      task_ids: taskIds,
+    };
+    if (id) body.id = id;
+    await API.post('/random-tasks/admin/groups', body);
+    closeModal(); toast('任务组保存成功', 'success'); loadTaskGroups();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function deleteTaskGroup(id) { if (!confirm('确定删除?')) return;
+  try { await API.del(`/random-tasks/admin/groups/${id}`); toast('已删除', 'success'); loadTaskGroups(); }
+  catch(e) { toast(e.message, 'error'); }
+}
+
+// bootstrapAuth 会自动处理已登录状态
+</script>
+</body>
+</html>

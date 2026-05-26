@@ -1,0 +1,27 @@
+{
+  "name": "points-trading-system",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker 点数交易系统",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "echo 'Run schema.sql in Supabase SQL Editor'"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.0",
+    "bcryptjs": "^2.4.3",
+    "hono": "^4.0.0",
+    "jose": "^5.2.0",
+    "pg": "^8.21.0",
+    "serverchan-sdk": "^1.0.6",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240501.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.50.0"
+  }
+}
