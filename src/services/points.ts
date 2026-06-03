@@ -183,7 +183,8 @@ export async function adminAdjustPoints(
     const r = await addPoints(supabase, userId, amount, 'admin_adjust', '', description, expiresAt, kv);
     return { balanceAfter: r.balanceAfter };
   } else if (amount < 0) {
-    const r = await deductPointsFIFO(supabase, userId, Math.abs(amount), 'admin_adjust', '', description, kv);
+    // 管理员扣点使用 applyDirectDelta，允许扣成负数，不检查余额
+    const r = await applyDirectDelta(supabase, userId, amount, 'admin_adjust', '', description, kv);
     return { balanceAfter: r.balanceAfter };
   }
   return { balanceAfter: await getRealtimeBalance(supabase, userId, kv) };
